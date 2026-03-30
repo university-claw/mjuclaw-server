@@ -68,7 +68,8 @@ app.post("/skill", (req, res) => {
     return;
   }
 
-  console.log(`[skill] user=${userId.slice(0, 8)}... msg="${utterance.slice(0, 50)}"`);
+  console.log(`[skill] user=${userId.slice(0, 8)}... msg="${utterance.slice(0, 50)}" callback=${!!callbackUrl}`);
+  console.log(`[skill] body: ${JSON.stringify(req.body)}`);
 
   // 미인증 유저 → 웰컴 카드 (온보딩 버튼)
   if (!isVerified(userId)) {
@@ -80,7 +81,9 @@ app.post("/skill", (req, res) => {
         console.error(`[skill] welcome callback error: ${err.message}`);
       });
     } else {
-      res.json(createWelcomeResponse(onboardUrl));
+      const welcomeRes = createWelcomeResponse(onboardUrl);
+      console.log(`[skill] response: ${JSON.stringify(welcomeRes).slice(0, 500)}`);
+      res.json(welcomeRes);
     }
     return;
   }
@@ -92,7 +95,11 @@ app.post("/skill", (req, res) => {
     });
   } else {
     handleSync(userId, utterance)
-      .then((text) => res.json(createTextResponse(text)))
+      .then((text) => {
+        const resp = createTextResponse(text);
+        console.log(`[skill] sync response: ${JSON.stringify(resp).slice(0, 300)}`);
+        res.json(resp);
+      })
       .catch(() => res.json(createTextResponse("처리 중 오류가 발생했습니다.")));
   }
 });
@@ -100,8 +107,17 @@ app.post("/skill", (req, res) => {
 // ── 비동기 처리 (콜백 사용) ──────────────────────────────────────
 
 async function processAsync(userId: string, utterance: string, callbackUrl: string): Promise<void> {
-  const result = await processMessage(userId, utterance);
-  await sendCallback(callbackUrl, result);
+  console.log(`[async] starting agent for user=${userId.slice(0, 8)}...`);
+  try {
+    const result = await processMessage(userId, utterance);
+    console.log(`[async] agent response (${result.length} chars): ${result.slice(0, 100)}`);
+    await sendCallback(callbackUrl, result);
+    console.log(`[async] callback sent to ${callbackUrl.slice(0, 60)}...`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[async] error: ${msg}`);
+    await sendCallback(callbackUrl, "오류가 발생했습니다. 다시 시도해주세요.").catch(() => {});
+  }
 }
 
 // ── 동기 처리 (5초 제한) ─────────────────────────────────────────
@@ -110,7 +126,23 @@ async function handleSync(userId: string, utterance: string): Promise<string> {
   const cmd = parseCommand(utterance);
   if (cmd) return handleCommand(userId, cmd.command, cmd.args);
 
-  return "콜백 API가 활성화되지 않아 에이전트를 사용할 수 없습니다.\n카카오 i 오픈빌더에서 콜백 기능을 활성화해주세요.";
+  // 4.5초 타임아웃으로 에이전트 호출 시도
+  try {
+    const result = await Promise.race([
+      runAgent(utterance, userId),
+      new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error("timeout")), 4500)
+      ),
+    ]);
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "timeout") {
+      return "응답 생성에 시간이 걸리고 있습니다. 잠시 후 다시 시도해주세요.";
+    }
+    console.error(`[skill] sync agent error: ${msg}`);
+    return "처리 중 오류가 발생했습니다.";
+  }
 }
 
 // ── 메시지 처리 ──────────────────────────────────────────────────

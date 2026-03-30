@@ -110,10 +110,12 @@ function execAgent(message: string, sessionId: string): Promise<string> {
         (l) =>
           !l.startsWith("Setting up NemoClaw") &&
           !l.startsWith("[plugins]") &&
+          !l.startsWith("[gateway]") &&
           !l.startsWith("(node:") &&
           !l.includes("NemoClaw ready") &&
           !l.includes("NemoClaw registered") &&
           !l.includes("openclaw agent") &&
+          !l.includes("privilege separation") &&
           !l.includes("┌─") &&
           !l.includes("│ ") &&
           !l.includes("└─") &&
