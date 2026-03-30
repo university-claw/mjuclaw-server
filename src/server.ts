@@ -1,12 +1,20 @@
 import express from "express";
+import path from "path";
 import { config } from "./config";
-import { createImmediateResponse, createTextResponse, sendCallback } from "./kakao";
+import {
+  createImmediateResponse,
+  createTextResponse,
+  createWelcomeResponse,
+  sendCallback,
+  sendCallbackWelcome,
+} from "./kakao";
 import { runAgent } from "./nemoclaw";
-import { getSession, isVerified, verifyPairing, resetSession, getStats } from "./session";
+import { isVerified, onboardUser, resetSession, getStats } from "./session";
 import type { KakaoSkillRequest } from "./types";
 
 export const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const startedAt = Date.now();
 
@@ -21,7 +29,33 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// ── POST /skill ──────────────────────────────────────────────────
+// ── GET /onboard — 학교 인증 웹페이지 ────────────────────────────
+
+app.get("/onboard", (req, res) => {
+  const uid = req.query.uid as string;
+  if (!uid) {
+    res.status(400).send("잘못된 접근입니다.");
+    return;
+  }
+  res.sendFile(path.join(__dirname, "..", "public", "onboard.html"));
+});
+
+// ── POST /onboard/submit — 크리덴셜 등록 ─────────────────────────
+
+app.post("/onboard/submit", (req, res) => {
+  const { uid, studentId, password } = req.body;
+
+  if (!uid || !studentId || !password) {
+    res.status(400).json({ success: false, message: "모든 필드를 입력해주세요." });
+    return;
+  }
+
+  const result = onboardUser(uid, studentId, password);
+  console.log(`[onboard] user=${String(uid).slice(0, 8)}... studentId=${studentId} → ${result.success}`);
+  res.json(result);
+});
+
+// ── POST /skill — 카카오 스킬 웹훅 ──────────────────────────────
 
 app.post("/skill", (req, res) => {
   const body = req.body as KakaoSkillRequest;
@@ -36,14 +70,27 @@ app.post("/skill", (req, res) => {
 
   console.log(`[skill] user=${userId.slice(0, 8)}... msg="${utterance.slice(0, 50)}"`);
 
+  // 미인증 유저 → 웰컴 카드 (온보딩 버튼)
+  if (!isVerified(userId)) {
+    const onboardUrl = `${config.serverUrl}/onboard?uid=${encodeURIComponent(userId)}`;
+
+    if (callbackUrl) {
+      res.json(createImmediateResponse("잠시만요..."));
+      sendCallbackWelcome(callbackUrl, onboardUrl).catch((err) => {
+        console.error(`[skill] welcome callback error: ${err.message}`);
+      });
+    } else {
+      res.json(createWelcomeResponse(onboardUrl));
+    }
+    return;
+  }
+
   if (callbackUrl) {
-    // 비동기: 즉시 응답 후 백그라운드 처리
     res.json(createImmediateResponse("생각 중..."));
     processAsync(userId, utterance, callbackUrl).catch((err) => {
       console.error(`[skill] async error: ${err.message}`);
     });
   } else {
-    // 동기: 5초 내 응답 (callbackUrl 없는 경우)
     handleSync(userId, utterance)
       .then((text) => res.json(createTextResponse(text)))
       .catch(() => res.json(createTextResponse("처리 중 오류가 발생했습니다.")));
@@ -60,12 +107,6 @@ async function processAsync(userId: string, utterance: string, callbackUrl: stri
 // ── 동기 처리 (5초 제한) ─────────────────────────────────────────
 
 async function handleSync(userId: string, utterance: string): Promise<string> {
-  // 동기 모드에서는 NemoClaw 호출이 5초 내에 안 끝날 수 있으므로
-  // 인증/명령어만 처리하고, 에이전트 호출은 안내 메시지 반환
-  if (!isVerified(userId)) {
-    return handleUnverified(userId, utterance);
-  }
-
   const cmd = parseCommand(utterance);
   if (cmd) return handleCommand(userId, cmd.command, cmd.args);
 
@@ -75,16 +116,9 @@ async function handleSync(userId: string, utterance: string): Promise<string> {
 // ── 메시지 처리 ──────────────────────────────────────────────────
 
 async function processMessage(userId: string, utterance: string): Promise<string> {
-  // 1. 인증 확인
-  if (!isVerified(userId)) {
-    return handleUnverified(userId, utterance);
-  }
-
-  // 2. 명령어 확인
   const cmd = parseCommand(utterance);
   if (cmd) return handleCommand(userId, cmd.command, cmd.args);
 
-  // 3. 에이전트 호출
   try {
     return await runAgent(utterance, userId);
   } catch (err) {
@@ -92,21 +126,6 @@ async function processMessage(userId: string, utterance: string): Promise<string
     console.error(`[skill] agent error: ${msg}`);
     return "에이전트 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.";
   }
-}
-
-// ── 미인증 유저 처리 ─────────────────────────────────────────────
-
-function handleUnverified(userId: string, utterance: string): string {
-  const cmd = parseCommand(utterance);
-  if (cmd?.command === "pair") {
-    const parts = cmd.args.split(/\s+/);
-    const code = parts[0] || "";
-    const name = parts.slice(1).join(" ") || undefined;
-    const result = verifyPairing(userId, code, name);
-    return result.message;
-  }
-
-  return "인증이 필요합니다.\n\n/pair [인증코드] [이름(선택)]\n\n예시: /pair mycode 홍길동";
 }
 
 // ── 명령어 파싱 ──────────────────────────────────────────────────

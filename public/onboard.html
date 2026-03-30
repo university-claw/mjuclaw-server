@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>학교 인증</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      padding: 32px 24px;
+      width: 100%;
+      max-width: 400px;
+    }
+    .logo {
+      text-align: center;
+      font-size: 32px;
+      margin-bottom: 8px;
+    }
+    h1 {
+      text-align: center;
+      font-size: 20px;
+      font-weight: 600;
+      color: #1a1a1a;
+      margin-bottom: 4px;
+    }
+    .subtitle {
+      text-align: center;
+      font-size: 14px;
+      color: #888;
+      margin-bottom: 24px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #555;
+      margin-bottom: 6px;
+    }
+    input {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.2s;
+      margin-bottom: 16px;
+    }
+    input:focus { border-color: #3B82F6; }
+    button {
+      width: 100%;
+      padding: 14px;
+      background: #3B82F6;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover { background: #2563EB; }
+    button:disabled { background: #93C5FD; cursor: not-allowed; }
+    .result {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      font-size: 14px;
+      text-align: center;
+      display: none;
+    }
+    .result.success { display: block; background: #ECFDF5; color: #065F46; }
+    .result.error { display: block; background: #FEF2F2; color: #991B1B; }
+    .notice {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #aaa;
+      text-align: center;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🎓</div>
+    <h1>학교 인증</h1>
+    <p class="subtitle">AI 에이전트 사용을 위해 학교 계정을 등록해주세요</p>
+
+    <form id="onboardForm">
+      <label for="studentId">학번</label>
+      <input type="text" id="studentId" name="studentId" placeholder="예: 60201234" required autocomplete="username">
+
+      <label for="password">비밀번호</label>
+      <input type="password" id="password" name="password" placeholder="학교 포털 비밀번호" required autocomplete="current-password">
+
+      <button type="submit" id="submitBtn">인증하기</button>
+    </form>
+
+    <div id="result" class="result"></div>
+
+    <p class="notice">
+      비밀번호는 암호화되어 안전하게 저장됩니다.<br>
+      카카오톡 채팅에서는 비밀번호가 전송되지 않습니다.
+    </p>
+  </div>
+
+  <script>
+    const uid = new URLSearchParams(location.search).get('uid');
+    const form = document.getElementById('onboardForm');
+    const btn = document.getElementById('submitBtn');
+    const resultDiv = document.getElementById('result');
+
+    if (!uid) {
+      resultDiv.textContent = '잘못된 접근입니다. 카카오톡에서 다시 시도해주세요.';
+      resultDiv.className = 'result error';
+      btn.disabled = true;
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      btn.disabled = true;
+      btn.textContent = '인증 중...';
+      resultDiv.className = 'result';
+      resultDiv.style.display = 'none';
+
+      try {
+        const res = await fetch('/onboard/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uid,
+            studentId: document.getElementById('studentId').value,
+            password: document.getElementById('password').value,
+          }),
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          resultDiv.textContent = '인증 완료! 카카오톡으로 돌아가서 대화를 시작하세요.';
+          resultDiv.className = 'result success';
+          form.style.display = 'none';
+        } else {
+          resultDiv.textContent = data.message || '인증에 실패했습니다.';
+          resultDiv.className = 'result error';
+          btn.disabled = false;
+          btn.textContent = '인증하기';
+        }
+      } catch {
+        resultDiv.textContent = '서버 연결에 실패했습니다. 잠시 후 다시 시도해주세요.';
+        resultDiv.className = 'result error';
+        btn.disabled = false;
+        btn.textContent = '인증하기';
+      }
+    });
+  </script>
+</body>
+</html>

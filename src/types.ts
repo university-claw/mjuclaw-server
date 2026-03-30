@@ -29,12 +29,27 @@ export interface KakaoSimpleText {
   simpleText: { text: string };
 }
 
+export interface KakaoBasicCard {
+  basicCard: {
+    title: string;
+    description: string;
+    buttons: Array<{
+      action: "webLink" | "message" | "block";
+      label: string;
+      webLinkUrl?: string;
+      messageText?: string;
+    }>;
+  };
+}
+
+export type KakaoOutput = KakaoSimpleText | KakaoBasicCard;
+
 export interface KakaoSkillResponse {
   version: "2.0";
   useCallback?: boolean;
   data?: { text: string };
   template?: {
-    outputs: KakaoSimpleText[];
+    outputs: KakaoOutput[];
     quickReplies?: Array<{
       messageText: string;
       action: "message" | "block";
@@ -49,12 +64,13 @@ export interface UserSession {
   kakaoId: string;
   isVerified: boolean;
   name: string;
-  pairingAttempts: number;
   lastActive: number;
 }
 
-export interface AllowedUser {
+export interface StoredCredential {
   kakaoId: string;
-  name: string;
-  addedAt: string;
+  studentId: string;
+  // AES-256-GCM 암호화된 비밀번호
+  encryptedPassword: string; // base64(iv:authTag:ciphertext)
+  createdAt: string;
 }
