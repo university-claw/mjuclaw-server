@@ -71,6 +71,8 @@ function execAgent(message: string, sessionId: string): Promise<string> {
 
     const safeSessionId = sessionId.replace(/[^a-zA-Z0-9-]/g, "");
     const cmd = [
+      ". /sandbox/.bashrc",
+      "&&",
       `export NVIDIA_API_KEY=${shellQuote(config.sandbox.nvidiaApiKey)}`,
       "&&",
       "nemoclaw-start",

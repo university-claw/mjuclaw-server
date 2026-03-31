@@ -8,6 +8,7 @@ import {
   sendCallback,
   sendCallbackWelcome,
 } from "./kakao";
+import { handleMjuRequest } from "./mju-tools";
 import { runAgent } from "./nemoclaw";
 import { isVerified, onboardUser, resetSession, getStats } from "./session";
 import type { KakaoSkillRequest } from "./types";
@@ -151,6 +152,17 @@ async function processMessage(userId: string, utterance: string): Promise<string
   const cmd = parseCommand(utterance);
   if (cmd) return handleCommand(userId, cmd.command, cmd.args);
 
+  // MJU 키워드 감지 → 호스트에서 직접 mju-mcp 도구 호출
+  try {
+    const mjuResult = await handleMjuRequest(userId, utterance);
+    if (mjuResult) return mjuResult;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[mju] error: ${msg}`);
+    return `학교 서비스 조회 중 오류가 발생했습니다: ${msg}`;
+  }
+
+  // 일반 메시지 → OpenClaw 에이전트
   try {
     return await runAgent(utterance, userId);
   } catch (err) {
