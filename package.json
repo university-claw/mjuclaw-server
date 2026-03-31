@@ -1,7 +1,7 @@
 {
-  "name": "nemoclaw-kakao-bridge",
-  "version": "0.1.0",
-  "description": "KakaoTalk ↔ NemoClaw bridge server",
+  "name": "mjuclaw-server",
+  "version": "0.2.0",
+  "description": "명지대 학사 서비스 + AI 에이전트 카카오톡 서버",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
