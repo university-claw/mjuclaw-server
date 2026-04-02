@@ -95,6 +95,13 @@ export function getDecryptedPassword(kakaoId: string): string | null {
   return decrypt(cred.encryptedPassword);
 }
 
+/** 저장된 크리덴셜의 학번 + 비밀번호 복호화 */
+export function getDecryptedCredentials(kakaoId: string): { studentId: string; password: string } | null {
+  const cred = findCredential(kakaoId);
+  if (!cred) return null;
+  return { studentId: cred.studentId, password: decrypt(cred.encryptedPassword) };
+}
+
 // ── 세션 관리 ────────────────────────────────────────────────────
 
 export function getSession(kakaoId: string): UserSession {

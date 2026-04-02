@@ -25,8 +25,12 @@
     }
     .logo {
       text-align: center;
-      font-size: 32px;
       margin-bottom: 8px;
+    }
+    .logo img {
+      width: 80px;
+      height: 80px;
+      object-fit: contain;
     }
     h1 {
       text-align: center;
@@ -83,6 +87,21 @@
     }
     .result.success { display: block; background: #ECFDF5; color: #065F46; }
     .result.error { display: block; background: #FEF2F2; color: #991B1B; }
+    .success-screen {
+      display: none;
+      text-align: center;
+      padding: 20px 0;
+    }
+    .success-screen .icon { font-size: 48px; margin-bottom: 12px; }
+    .success-screen .title { font-size: 18px; font-weight: 600; color: #065F46; margin-bottom: 8px; }
+    .success-screen .desc { font-size: 14px; color: #888; line-height: 1.6; }
+    .loading-text {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #888;
+      text-align: center;
+      display: none;
+    }
     .notice {
       margin-top: 16px;
       font-size: 12px;
@@ -94,7 +113,7 @@
 </head>
 <body>
   <div class="card">
-    <div class="logo">🎓</div>
+    <div class="logo"><img src="/myongmyong.png" alt="명명이"></div>
     <h1>학교 인증</h1>
     <p class="subtitle">AI 에이전트 사용을 위해 학교 계정을 등록해주세요</p>
 
@@ -109,8 +128,15 @@
     </form>
 
     <div id="result" class="result"></div>
+    <p id="loadingText" class="loading-text">학교 서버에 로그인하여 확인 중입니다...</p>
 
-    <p class="notice">
+    <div id="successScreen" class="success-screen">
+      <div class="icon"><img src="/myongmyong.png" alt="명명이" style="width:80px;height:80px;object-fit:contain;"></div>
+      <div class="title">인증 완료!</div>
+      <div class="desc">카카오톡으로 돌아가서<br>메시지를 보내보세요</div>
+    </div>
+
+    <p class="notice" id="notice">
       비밀번호는 암호화되어 안전하게 저장됩니다.<br>
       카카오톡 채팅에서는 비밀번호가 전송되지 않습니다.
     </p>
@@ -128,10 +154,15 @@
       btn.disabled = true;
     }
 
+    const loadingText = document.getElementById('loadingText');
+    const successScreen = document.getElementById('successScreen');
+    const notice = document.getElementById('notice');
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       btn.disabled = true;
       btn.textContent = '인증 중...';
+      loadingText.style.display = 'block';
       resultDiv.className = 'result';
       resultDiv.style.display = 'none';
 
@@ -147,10 +178,12 @@
         });
         const data = await res.json();
 
+        loadingText.style.display = 'none';
+
         if (data.success) {
-          resultDiv.textContent = '인증 완료! 카카오톡으로 돌아가서 대화를 시작하세요.';
-          resultDiv.className = 'result success';
           form.style.display = 'none';
+          notice.style.display = 'none';
+          successScreen.style.display = 'block';
         } else {
           resultDiv.textContent = data.message || '인증에 실패했습니다.';
           resultDiv.className = 'result error';
@@ -158,6 +191,7 @@
           btn.textContent = '인증하기';
         }
       } catch {
+        loadingText.style.display = 'none';
         resultDiv.textContent = '서버 연결에 실패했습니다. 잠시 후 다시 시도해주세요.';
         resultDiv.className = 'result error';
         btn.disabled = false;

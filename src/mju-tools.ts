@@ -1,113 +1,90 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { execFile } from "child_process";
 import path from "path";
-import { getDecryptedPassword } from "./session";
+import { getDecryptedCredentials } from "./session";
 
-const MJU_MCP_PATH = path.join(__dirname, "..", "mju-mcp", "dist", "index.js");
+const MJU_CLI = path.join(__dirname, "..", "mju-cli", "dist", "main.js");
+const USER_DATA_DIR = path.join(__dirname, "..", "data", "users");
 
-let client: Client | null = null;
-let transport: StdioClientTransport | null = null;
+// ── CLI 실행 ────────────────────────────────────────────────────────
 
-// ── MCP 클라이언트 초기화 ────────────────────────────────────────
-
-async function getClient(kakaoId: string): Promise<Client> {
-  if (client) return client;
-
-  // 유저 크리덴셜 복호화
-  const password = getDecryptedPassword(kakaoId);
-
-  transport = new StdioClientTransport({
-    command: "node",
-    args: [MJU_MCP_PATH],
-    env: {
-      ...process.env,
-      MJU_USERNAME: "60212158", // TODO: 유저별 학번 매핑
-      MJU_PASSWORD: password || "",
-      MJU_LMS_APP_DIR: path.join(__dirname, "..", "data", "mju-mcp"),
-      MJU_MSI_APP_DIR: path.join(__dirname, "..", "data", "mju-mcp"),
-      MJU_UCHECK_APP_DIR: path.join(__dirname, "..", "data", "mju-mcp"),
-      MJU_LIBRARY_APP_DIR: path.join(__dirname, "..", "data", "mju-mcp"),
-    },
+function runMju(args: string[], timeoutMs = 30_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("node", [MJU_CLI, ...args], { timeout: timeoutMs }, (err, stdout, stderr) => {
+      if (err) {
+        // CLI가 에러를 JSON으로 출력할 수 있으므로 stdout 우선 확인
+        if (stdout.trim()) {
+          resolve(stdout.trim());
+          return;
+        }
+        reject(new Error(stderr.trim() || err.message));
+        return;
+      }
+      resolve(stdout.trim());
+    });
   });
-
-  client = new Client({ name: "kakao-bridge", version: "0.1.0" });
-  await client.connect(transport);
-  console.log("[mju] MCP client connected");
-  return client;
 }
 
-// ── 도구 호출 ────────────────────────────────────────────────────
+function userAppDir(kakaoId: string): string {
+  // 유저별 격리된 데이터 디렉토리
+  const safeId = kakaoId.replace(/[^a-zA-Z0-9_-]/g, "");
+  return path.join(USER_DATA_DIR, safeId);
+}
 
-export async function callMjuTool(
-  kakaoId: string,
-  toolName: string,
-  args: Record<string, unknown> = {}
-): Promise<string> {
+/** mju CLI를 JSON 모드로 실행하고 파싱된 결과 반환 */
+async function mjuJson<T = unknown>(kakaoId: string, args: string[]): Promise<T> {
+  const appDir = userAppDir(kakaoId);
+  const stdout = await runMju(["--app-dir", appDir, "--format", "json", ...args]);
+  return JSON.parse(stdout) as T;
+}
+
+// ── 인증 (온보딩 시 호출) ───────────────────────────────────────────
+
+export async function mjuLogin(kakaoId: string, studentId: string, password: string): Promise<{ success: boolean; message: string }> {
   try {
-    const c = await getClient(kakaoId);
-    const result = await c.callTool({ name: toolName, arguments: args });
-
-    // MCP 도구 결과를 텍스트로 변환
-    if (result.content && Array.isArray(result.content)) {
-      return result.content
-        .map((item) => {
-          if (typeof item === "object" && item !== null && "text" in item) {
-            return String(item.text);
-          }
-          return JSON.stringify(item);
-        })
-        .join("\n");
-    }
-    return JSON.stringify(result);
+    await mjuJson(kakaoId, ["auth", "login", "--id", studentId, "--password", password]);
+    return { success: true, message: "학교 인증이 완료되었습니다!" };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[mju] tool ${toolName} error: ${msg}`);
-    return `도구 호출 오류: ${msg}`;
+    // CLI가 JSON 에러를 반환한 경우 파싱 시도
+    try {
+      const parsed = JSON.parse(msg);
+      return { success: false, message: parsed.error?.message || msg };
+    } catch {
+      return { success: false, message: `인증 실패: ${msg}` };
+    }
   }
 }
 
-// ── 사용 가능한 도구 목록 ────────────────────────────────────────
-
-export async function listMjuTools(kakaoId: string): Promise<string[]> {
-  try {
-    const c = await getClient(kakaoId);
-    const tools = await c.listTools();
-    return tools.tools.map((t) => t.name);
-  } catch {
-    return [];
-  }
-}
-
-// ── 키워드 → 도구 매핑 ──────────────────────────────────────────
+// ── 키워드 → CLI 커맨드 매핑 ────────────────────────────────────────
 
 interface IntentEntry {
   keywords: string[];
-  tool: string;
+  command: string[];        // mju CLI 서브커맨드 + 옵션
   description: string;
   emoji: string;
-  args?: Record<string, unknown>; // 기본 파라미터
-  handler?: "attendance" | "simple"; // 특수 핸들러
+  formatter: (data: unknown) => string;
 }
 
 const KEYWORD_MAP: IntentEntry[] = [
-  // 출석 — 과목별 체이닝 필요
-  { keywords: ["출석", "출결", "결석", "지각"], tool: "mju_ucheck_get_course_attendance", description: "출석 현황", emoji: "📋", handler: "attendance" },
-  // allCourses 지원 — 바로 전체 조회
-  { keywords: ["과제", "숙제", "레포트", "할 일", "할일", "투두"], tool: "mju_lms_get_action_items", description: "할 일 목록", emoji: "📝", args: { allCourses: true } },
-  { keywords: ["미제출"], tool: "mju_lms_get_unsubmitted_assignments", description: "미제출 과제", emoji: "⚠️", args: { allCourses: true } },
-  { keywords: ["마감", "데드라인", "임박"], tool: "mju_lms_get_due_assignments", description: "마감 임박 과제", emoji: "⏰", args: { allCourses: true } },
-  { keywords: ["안읽은 공지", "새 공지"], tool: "mju_lms_get_unread_notices", description: "안읽은 공지", emoji: "🔔", args: { allCourses: true } },
-  { keywords: ["미수강", "온라인 강의", "온라인강의"], tool: "mju_lms_get_incomplete_online_weeks", description: "미수강 온라인 학습", emoji: "🎬", args: { allCourses: true } },
-  // 단순 호출 (파라미터 불필요)
-  { keywords: ["시간표", "수업시간", "강의시간"], tool: "mju_msi_get_timetable", description: "시간표", emoji: "🕐" },
-  { keywords: ["성적", "학점", "점수"], tool: "mju_msi_get_current_term_grades", description: "이번 학기 성적", emoji: "📊" },
-  { keywords: ["성적이력", "전체성적", "전체 성적"], tool: "mju_msi_get_grade_history", description: "성적 이력", emoji: "📈" },
-  { keywords: ["졸업", "졸업요건", "졸업학점"], tool: "mju_msi_get_graduation_requirements", description: "졸업 요건", emoji: "🎓" },
-  { keywords: ["과목", "수강", "강의목록"], tool: "mju_lms_list_courses", description: "수강 과목", emoji: "📚" },
-  { keywords: ["공지", "알림"], tool: "mju_lms_list_notices", description: "공지사항", emoji: "📢", args: { allCourses: true } },
+  // 출석 — 과목별 체이닝이 필요하므로 별도 핸들러
+  { keywords: ["출석", "출결", "결석", "지각"], command: [], description: "출석 현황", emoji: "📋", formatter: () => "" },
+  // LMS helper 커맨드
+  { keywords: ["과제", "숙제", "레포트", "할 일", "할일", "투두"], command: ["lms", "+action-items", "--all-courses"], description: "할 일 목록", emoji: "📝", formatter: formatActionItems },
+  { keywords: ["미제출"], command: ["lms", "+unsubmitted", "--all-courses"], description: "미제출 과제", emoji: "⚠️", formatter: formatUnsubmitted },
+  { keywords: ["마감", "데드라인", "임박"], command: ["lms", "+due-assignments", "--all-courses"], description: "마감 임박 과제", emoji: "⏰", formatter: formatDueAssignments },
+  { keywords: ["안읽은 공지", "새 공지"], command: ["lms", "+unread-notices", "--all-courses"], description: "안읽은 공지", emoji: "🔔", formatter: formatUnreadNotices },
+  { keywords: ["미수강", "온라인 강의", "온라인강의"], command: ["lms", "+incomplete-online", "--all-courses"], description: "미수강 온라인 학습", emoji: "🎬", formatter: formatGeneric },
+  // MSI
+  { keywords: ["시간표", "수업시간", "강의시간"], command: ["msi", "timetable"], description: "시간표", emoji: "🕐", formatter: formatTimetable },
+  { keywords: ["성적", "학점", "점수"], command: ["msi", "current-grades"], description: "이번 학기 성적", emoji: "📊", formatter: formatGrades },
+  { keywords: ["성적이력", "전체성적", "전체 성적"], command: ["msi", "grade-history"], description: "성적 이력", emoji: "📈", formatter: formatGeneric },
+  { keywords: ["졸업", "졸업요건", "졸업학점"], command: ["msi", "graduation"], description: "졸업 요건", emoji: "🎓", formatter: formatGraduation },
+  // LMS 기본
+  { keywords: ["과목", "수강", "강의목록"], command: ["lms", "courses", "list"], description: "수강 과목", emoji: "📚", formatter: formatCourses },
+  { keywords: ["공지", "알림"], command: ["lms", "+unread-notices", "--all-courses"], description: "공지사항", emoji: "📢", formatter: formatUnreadNotices },
   // 도서관
-  { keywords: ["스터디룸", "스터디 룸"], tool: "mju_library_list_study_rooms", description: "스터디룸 현황", emoji: "🏫" },
-  { keywords: ["열람실", "좌석"], tool: "mju_library_list_reading_rooms", description: "열람실 현황", emoji: "📖" },
+  { keywords: ["스터디룸", "스터디 룸"], command: ["library", "study-rooms", "list"], description: "스터디룸 현황", emoji: "🏫", formatter: formatGeneric },
+  { keywords: ["열람실", "좌석"], command: ["library", "reading-rooms", "list"], description: "열람실 현황", emoji: "📖", formatter: formatGeneric },
 ];
 
 export function detectMjuIntent(utterance: string): IntentEntry | null {
@@ -120,311 +97,272 @@ export function detectMjuIntent(utterance: string): IntentEntry | null {
   return null;
 }
 
-// ── 스마트 핸들러 ────────────────────────────────────────────────
+// ── 스마트 핸들러 ────────────────────────────────────────────────────
 
 export async function handleMjuRequest(kakaoId: string, utterance: string): Promise<string | null> {
   const intent = detectMjuIntent(utterance);
   if (!intent) return null;
 
-  console.log(`[mju] detected: ${intent.tool} (${intent.description})`);
+  console.log(`[mju] detected: ${intent.description}`);
 
   // 출석 — 특수 체이닝
-  if (intent.handler === "attendance") {
+  if (intent.keywords[0] === "출석") {
     return await handleAttendance(kakaoId);
   }
 
-  // 일반 도구 호출 (args가 있으면 함께 전달)
-  const result = await callMjuTool(kakaoId, intent.tool, intent.args || {});
-  return formatResult(intent, result);
+  try {
+    const data = await mjuJson(kakaoId, intent.command);
+
+    // CLI가 에러 JSON을 반환한 경우
+    if (data && typeof data === "object" && "error" in (data as Record<string, unknown>)) {
+      const errObj = (data as { error: { message?: string } }).error;
+      return `${intent.emoji} ${intent.description}\n\n오류: ${errObj.message || "알 수 없는 오류"}`;
+    }
+
+    return intent.formatter(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `${intent.emoji} ${intent.description}\n\n조회 실패: ${msg}`;
+  }
 }
+
+// ── 출석 핸들러 (과목 목록 → 각 과목 출석 조회) ─────────────────────
 
 async function handleAttendance(kakaoId: string): Promise<string> {
-  // 1) 과목 목록 가져오기
-  const coursesRaw = await callMjuTool(kakaoId, "mju_lms_list_courses");
+  try {
+    // 1) UCheck 과목 목록
+    const lectures = await mjuJson<{ lectures: UcheckLecture[] }>(kakaoId, ["ucheck", "lectures", "list"]);
 
-  // 텍스트에서 과목명과 과목코드 추출 (패턴: | 과목명 | 과목코드-분반 | 교수 | ...)
-  const courseRegex = /\|\s*(.+?)\s*\|\s*([\w]+-\d+)\s*\|/g;
-  const courses: Array<{ name: string; code: string }> = [];
-  let match;
-  while ((match = courseRegex.exec(coursesRaw)) !== null) {
-    courses.push({ name: match[1].trim(), code: match[2].trim() });
-  }
-
-  if (courses.length === 0) {
-    return `📋 출석 현황\n\n과목을 찾을 수 없습니다.\n\n${coursesRaw.slice(0, 500)}`;
-  }
-
-  // 2) 각 과목 출석 조회 (과목명으로 검색) + 요약 포맷
-  const results: string[] = [];
-  for (const course of courses) {
-    try {
-      const att = await callMjuTool(kakaoId, "mju_ucheck_get_course_attendance", { course: course.name });
-      results.push(formatAttendanceSummary(course.name, att));
-    } catch {
-      results.push(`📚 ${course.name} — 조회 실패`);
+    if (!lectures.lectures || lectures.lectures.length === 0) {
+      return "📋 출석 현황\n\n등록된 과목이 없습니다.";
     }
-  }
 
-  return `📋 출석 현황\n\n${results.join("\n\n")}`;
+    // 2) 각 과목 출석 조회
+    const results: string[] = [];
+    for (const lec of lectures.lectures) {
+      try {
+        const att = await mjuJson<UcheckAttendance>(kakaoId, [
+          "ucheck", "attendance", "--lecture-no", String(lec.lectureNo),
+        ]);
+        results.push(formatAttendanceSummary(lec.courseTitle, att));
+      } catch {
+        results.push(`📚 ${lec.courseTitle} — 조회 실패`);
+      }
+    }
+
+    return `📋 출석 현황\n\n${results.join("\n\n")}`;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `📋 출석 현황\n\n조회 실패: ${msg}`;
+  }
 }
 
-function formatAttendanceSummary(courseName: string, raw: string): string {
-  // 요약 행 추출: "출석 7 | 지각 0 | 조퇴 0 | 결석 1"
-  const summaryMatch = raw.match(/출석\s*(\d+)\s*\|\s*지각\s*(\d+)\s*\|\s*조퇴\s*(\d+)\s*\|\s*결석\s*(\d+)/);
-  const sessionsMatch = raw.match(/진행된 회차\s*(\d+)개/);
+// ── 타입 (mju-cli JSON 출력 구조) ───────────────────────────────────
 
-  let summary = "";
-  if (summaryMatch) {
-    const [, att, late, early, absent] = summaryMatch;
-    const done = sessionsMatch ? sessionsMatch[1] : "?";
-    summary = `출석${att} 지각${late} 결석${absent}`;
-    if (Number(early) > 0) summary += ` 조퇴${early}`;
-    summary += ` (${done}회 진행)`;
-  }
+interface UcheckLecture {
+  lectureNo: number;
+  courseTitle: string;
+  courseCode: string;
+  professor?: string;
+}
 
-  // 문제 있는 회차만 추출 (결석, 지각, 조퇴, 기록 없음)
-  const problemLines: string[] = [];
-  const lineRegex = /- .+?\|.+?\|.+?\|.+?\|\s*(결석|지각|조퇴|기록 없음)/g;
-  let m;
-  while ((m = lineRegex.exec(raw)) !== null) {
-    // 날짜와 상태만 추출
-    const parts = m[0].split("|").map((s) => s.trim());
-    const date = parts[1]?.trim() || "";
-    const status = m[1];
-    problemLines.push(`  ${date} → ${status}`);
-  }
+interface UcheckAttendance {
+  studentName: string;
+  course: { courseTitle: string };
+  summary: {
+    attendedCount: number;
+    tardyCount: number;
+    earlyLeaveCount: number;
+    absentCount: number;
+  };
+  totalSessions: number;
+  completedSessions: number;
+  sessions: Array<{
+    week: number;
+    date?: string;
+    statusLabel?: string;
+    isPast: boolean;
+  }>;
+}
 
-  let result = `📚 ${courseName} — ${summary || "요약 없음"}`;
-  if (problemLines.length > 0) {
-    result += `\n⚠️ 주의:\n${problemLines.join("\n")}`;
+interface TimetableEntry {
+  dayOfWeek: number;
+  dayLabel: string;
+  courseTitle: string;
+  location?: string;
+  professor?: string;
+  timeRange?: string;
+}
+
+interface GradeItem {
+  courseTitle: string;
+  credits?: number;
+  grade?: string;
+  statusMessage?: string;
+}
+
+interface GraduationGap {
+  label: string;
+  earned?: number;
+  required?: number;
+  gap?: number;
+}
+
+interface CourseSummary {
+  title: string;
+  code?: string;
+  professor?: string;
+}
+
+// ── 포맷터 ──────────────────────────────────────────────────────────
+
+function formatAttendanceSummary(courseName: string, att: UcheckAttendance): string {
+  const s = att.summary;
+  let summary = `출석${s.attendedCount} 지각${s.tardyCount} 결석${s.absentCount}`;
+  if (s.earlyLeaveCount > 0) summary += ` 조퇴${s.earlyLeaveCount}`;
+  summary += ` (${att.completedSessions}/${att.totalSessions}회)`;
+
+  // 문제 있는 세션만 표시
+  const problems = att.sessions.filter(
+    (s) => s.isPast && s.statusLabel && !["출석", "정상"].includes(s.statusLabel)
+  );
+  let result = `📚 ${courseName} — ${summary}`;
+  if (problems.length > 0) {
+    const lines = problems.map((p) => `  ${p.date || `${p.week}주차`} → ${p.statusLabel}`);
+    result += `\n⚠️ 주의:\n${lines.join("\n")}`;
   }
   return result;
 }
 
-function formatResult(intent: IntentEntry, raw: string): string {
-  const formatters: Record<string, (r: string) => string> = {
-    mju_lms_get_action_items: formatActionItems,
-    mju_msi_get_timetable: formatTimetable,
-    mju_msi_get_current_term_grades: formatGrades,
-    mju_msi_get_graduation_requirements: formatGraduation,
-    mju_lms_list_courses: formatCourses,
-    mju_lms_get_unsubmitted_assignments: formatUnsubmitted,
-    mju_lms_get_due_assignments: formatDueAssignments,
-    mju_lms_get_unread_notices: formatUnreadNotices,
-  };
+function formatTimetable(data: unknown): string {
+  const d = data as { entries: TimetableEntry[] };
+  if (!d.entries || d.entries.length === 0) return "🕐 시간표\n\n등록된 시간표가 없습니다.";
 
-  const formatter = formatters[intent.tool];
-  if (formatter) return formatter(raw);
-  return `${intent.emoji} ${intent.description}\n\n${raw}`;
-}
-
-// ── 시간표 ───────────────────────────────────────────────────────
-
-function formatTimetable(raw: string): string {
-  // 요일별 그룹핑
   const dayOrder = ["월", "화", "수", "목", "금"];
-  const schedule = new Map<string, string[]>();
-  const regex = /- (.+?)\s*\|\s*(\S)\s*\|\s*(\S+)\s*\|\s*(.+?)\s*\|\s*(.+)/g;
-  let m;
-  while ((m = regex.exec(raw)) !== null) {
-    const [, name, day, time, , room] = m;
-    const entry = `  ${time} ${name} (${room.trim()})`;
-    if (!schedule.has(day)) schedule.set(day, []);
-    schedule.get(day)!.push(entry);
+  const byDay = new Map<string, string[]>();
+
+  for (const e of d.entries) {
+    const day = e.dayLabel || dayOrder[e.dayOfWeek - 1] || "?";
+    const line = `  ${e.timeRange || ""} ${e.courseTitle}${e.location ? ` (${e.location})` : ""}`;
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day)!.push(line);
   }
 
   const lines: string[] = [];
   for (const day of dayOrder) {
-    const entries = schedule.get(day);
+    const entries = byDay.get(day);
     if (entries) {
       lines.push(`${day}요일`);
-      // 시간순 정렬
       entries.sort();
       lines.push(...entries);
     }
   }
 
-  return lines.length > 0
-    ? `🕐 시간표\n\n${lines.join("\n")}`
-    : `🕐 시간표\n\n${raw}`;
+  return `🕐 시간표\n\n${lines.join("\n")}`;
 }
 
-// ── 성적 ─────────────────────────────────────────────────────────
+function formatGrades(data: unknown): string {
+  const d = data as { items: GradeItem[]; year?: number; termLabel?: string };
+  if (!d.items || d.items.length === 0) return "📊 이번 학기 성적\n\n성적 정보가 없습니다.";
 
-function formatGrades(raw: string): string {
-  const lines: string[] = [];
-  const regex = /- (.+?)\s*\|\s*\d+\s*\|\s*(\d+학점)\s*\|\s*(.+)/g;
-  let m;
-  while ((m = regex.exec(raw)) !== null) {
-    const [, name, credits, note] = m;
-    lines.push(`  ${name} (${credits}) — ${note.trim()}`);
-  }
+  const lines = d.items.map((item) => {
+    const credits = item.credits ? `${item.credits}학점` : "";
+    const grade = item.grade || item.statusMessage || "미공개";
+    return `  ${item.courseTitle} (${credits}) — ${grade}`;
+  });
 
-  const countMatch = raw.match(/(\d+)건/);
-  const header = countMatch ? `총 ${countMatch[1]}과목` : "";
-
-  return lines.length > 0
-    ? `📊 이번 학기 성적 ${header}\n\n${lines.join("\n")}`
-    : `📊 이번 학기 성적\n\n${raw}`;
+  const header = d.termLabel ? `${d.year}년 ${d.termLabel}` : "";
+  return `📊 이번 학기 성적 ${header}\n총 ${d.items.length}과목\n\n${lines.join("\n")}`;
 }
 
-// ── 졸업요건 ─────────────────────────────────────────────────────
+function formatGraduation(data: unknown): string {
+  const d = data as { creditGaps: GraduationGap[]; notes?: string[] };
+  if (!d.creditGaps || d.creditGaps.length === 0) return "🎓 졸업요건\n\n정보를 찾을 수 없습니다.";
 
-function formatGraduation(raw: string): string {
-  const lines: string[] = [];
-  const regex = /- (.+?)\s*\|\s*취득\s*(\d+)\s*\|\s*필요\s*(\d+)\s*\|\s*부족\s*(\d+)/g;
-  let m;
-  while ((m = regex.exec(raw)) !== null) {
-    const [, category, earned, required, short] = m;
-    const bar = Number(short) > 0 ? "🔴" : "✅";
-    lines.push(`  ${bar} ${category}: ${earned}/${required} (부족 ${short})`);
-  }
+  const shortCount = d.creditGaps.filter((g) => (g.gap || 0) > 0).length;
+  const status = shortCount > 0 ? `부족 ${shortCount}건` : "충족";
 
-  const shortMatch = raw.match(/부족 항목 (\d+)건/);
-  const status = shortMatch
-    ? Number(shortMatch[1]) > 0 ? `부족 ${shortMatch[1]}건` : "충족"
-    : "";
+  const lines = d.creditGaps.map((g) => {
+    const bar = (g.gap || 0) > 0 ? "🔴" : "✅";
+    return `  ${bar} ${g.label}: ${g.earned ?? "?"}/${g.required ?? "?"} (부족 ${g.gap ?? 0})`;
+  });
 
-  return lines.length > 0
-    ? `🎓 졸업요건 — ${status}\n\n${lines.join("\n")}`
-    : `🎓 졸업요건\n\n${raw}`;
+  return `🎓 졸업요건 — ${status}\n\n${lines.join("\n")}`;
 }
 
-// ── 수강과목 ─────────────────────────────────────────────────────
+function formatCourses(data: unknown): string {
+  const d = data as { courses: CourseSummary[] };
+  if (!d.courses || d.courses.length === 0) return "📚 수강과목\n\n등록된 과목이 없습니다.";
 
-function formatCourses(raw: string): string {
-  const lines: string[] = [];
-  const regex = /\|\s*(.+?)\s*\|\s*([\w]+-\d+)\s*\|\s*(.+?)\s*\|/g;
-  let m;
-  while ((m = regex.exec(raw)) !== null) {
-    const [, name, code, prof] = m;
-    lines.push(`  📚 ${name} (${prof.trim()})`);
-  }
-
-  const countMatch = raw.match(/총\s*(\d+)개/);
-  return lines.length > 0
-    ? `📚 수강과목 ${countMatch ? countMatch[1] + "개" : ""}\n\n${lines.join("\n")}`
-    : `📚 수강과목\n\n${raw}`;
+  const lines = d.courses.map((c) => `  📚 ${c.title}${c.professor ? ` (${c.professor})` : ""}`);
+  return `📚 수강과목 ${d.courses.length}개\n\n${lines.join("\n")}`;
 }
 
-// ── 미제출 과제 ──────────────────────────────────────────────────
-
-function formatUnsubmitted(raw: string): string {
-  const lines: string[] = [];
-  const regex = /- \[\d+\]\s*(.+?)\s*\|\s*(.+?)\s*\|\s*.+?\s*\|\s*(.+)/g;
-  let m;
-  while ((m = regex.exec(raw)) !== null) {
-    const isExpired = m[3].includes("만료");
-    lines.push(`  ${isExpired ? "🔴" : "🟡"} ${m[1].trim()} (${m[2].trim()}) — ${m[3].trim()}`);
-  }
-  const countMatch = raw.match(/(\d+)건/);
-  return lines.length > 0
-    ? `⚠️ 미제출 과제 ${countMatch ? countMatch[1] + "건" : ""}\n\n${lines.join("\n")}`
-    : `⚠️ 미제출 과제\n\n${raw}`;
-}
-
-// ── 마감 임박 ────────────────────────────────────────────────────
-
-function formatDueAssignments(raw: string): string {
-  const lines: string[] = [];
-  const regex = /- \[\d+\]\s*(.+?)\s*\|\s*(.+?)\s*\|\s*.+?\s*\|\s*(.+)/g;
-  let m;
-  while ((m = regex.exec(raw)) !== null) {
-    lines.push(`  ⏰ ${m[1].trim()} (${m[2].trim()}) — ${m[3].trim()}`);
-  }
-  const countMatch = raw.match(/(\d+)건/);
-  if (lines.length === 0) return "⏰ 마감 임박 과제 없음";
-  return `⏰ 마감 임박 ${countMatch ? countMatch[1] + "건" : ""}\n\n${lines.join("\n")}`;
-}
-
-// ── 안읽은 공지 ──────────────────────────────────────────────────
-
-function formatUnreadNotices(raw: string): string {
-  const lines: string[] = [];
-  const regex = /- \[\d+\]\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|/g;
-  let m;
-  while ((m = regex.exec(raw)) !== null) {
-    lines.push(`  🔔 ${m[1].trim()} (${m[2].trim()})`);
-  }
-  const countMatch = raw.match(/(\d+)건/);
-  if (lines.length === 0) return "🔔 새로운 공지 없음";
-  return `🔔 안읽은 공지 ${countMatch ? countMatch[1] + "건" : ""}\n\n${lines.join("\n")}`;
-}
-
-// ── 할 일 목록 ───────────────────────────────────────────────────
-
-function formatActionItems(raw: string): string {
+function formatActionItems(data: unknown): string {
+  const d = data as Record<string, unknown>;
   const sections: string[] = [];
 
   // 미제출 과제
-  const unsubMatch = raw.match(/미제출 과제 (\d+)건/);
-  if (unsubMatch && Number(unsubMatch[1]) > 0) {
-    const lines: string[] = [];
-    const regex = /- \[\d+\]\s*(.+?)\s*\|\s*(.+?)\s*\|\s*.+?\s*\|\s*(.+)/g;
-    let m;
-    // 미제출 과제 섹션만 파싱
-    const unsubSection = raw.split("미제출 과제")[1]?.split(/\n\n|\n\d+일 이내|\n안읽은|\n미수강/)[0] || "";
-    while ((m = regex.exec(unsubSection)) !== null) {
-      const name = m[1].trim();
-      const course = m[2].trim();
-      const deadline = m[3].trim();
-      const isExpired = deadline.includes("만료");
-      lines.push(`  ${isExpired ? "🔴" : "🟡"} ${name} (${course}) — ${deadline}`);
-    }
-    if (lines.length > 0) {
-      sections.push(`📌 미제출 과제 ${unsubMatch[1]}건\n${lines.join("\n")}`);
-    }
+  const unsub = d.unsubmittedAssignments as Array<{ title: string; courseTitle: string; dueLabel?: string; isExpired?: boolean }> | undefined;
+  if (unsub && unsub.length > 0) {
+    const lines = unsub.map((a) => `  ${a.isExpired ? "🔴" : "🟡"} ${a.title} (${a.courseTitle})${a.dueLabel ? ` — ${a.dueLabel}` : ""}`);
+    sections.push(`📌 미제출 과제 ${unsub.length}건\n${lines.join("\n")}`);
   }
 
   // 마감 임박
-  const dueMatch = raw.match(/(\d+)일 이내 마감 과제 (\d+)건/);
-  if (dueMatch && Number(dueMatch[2]) > 0) {
-    const dueSection = raw.split("이내 마감 과제")[1]?.split(/\n\n|\n안읽은|\n미수강/)[0] || "";
-    const lines: string[] = [];
-    const regex = /- \[\d+\]\s*(.+?)\s*\|\s*(.+?)\s*\|\s*.+?\s*\|\s*(.+)/g;
-    let m;
-    while ((m = regex.exec(dueSection)) !== null) {
-      lines.push(`  ⏰ ${m[1].trim()} (${m[2].trim()}) — ${m[3].trim()}`);
-    }
-    if (lines.length > 0) {
-      sections.push(`⏰ 마감 임박 ${dueMatch[2]}건\n${lines.join("\n")}`);
-    }
+  const due = d.dueAssignments as Array<{ title: string; courseTitle: string; dueLabel?: string }> | undefined;
+  if (due && due.length > 0) {
+    const lines = due.map((a) => `  ⏰ ${a.title} (${a.courseTitle})${a.dueLabel ? ` — ${a.dueLabel}` : ""}`);
+    sections.push(`⏰ 마감 임박 ${due.length}건\n${lines.join("\n")}`);
   }
 
   // 안읽은 공지
-  const noticeMatch = raw.match(/안읽은 공지 (\d+)건/);
-  if (noticeMatch && Number(noticeMatch[1]) > 0) {
-    const noticeSection = raw.split("안읽은 공지")[1]?.split(/\n\n|\n미수강/)[0] || "";
-    const lines: string[] = [];
-    const regex = /- \[\d+\]\s*(.+?)\s*\|\s*(.+?)\s*\|/g;
-    let m;
-    while ((m = regex.exec(noticeSection)) !== null) {
-      lines.push(`  🔔 ${m[1].trim()} (${m[2].trim()})`);
-    }
-    if (lines.length > 0) {
-      sections.push(`🔔 안읽은 공지 ${noticeMatch[1]}건\n${lines.join("\n")}`);
-    }
+  const notices = d.unreadNotices as Array<{ title: string; courseTitle: string }> | undefined;
+  if (notices && notices.length > 0) {
+    const lines = notices.map((n) => `  🔔 ${n.title} (${n.courseTitle})`);
+    sections.push(`🔔 안읽은 공지 ${notices.length}건\n${lines.join("\n")}`);
   }
 
   // 미수강 온라인
-  const onlineMatch = raw.match(/미수강 온라인 학습 (\d+)건/);
-  if (onlineMatch && Number(onlineMatch[1]) > 0) {
-    sections.push(`🎬 미수강 온라인 학습 ${onlineMatch[1]}건`);
+  const online = d.incompleteOnline as Array<unknown> | undefined;
+  if (online && online.length > 0) {
+    sections.push(`🎬 미수강 온라인 학습 ${online.length}건`);
   }
 
-  if (sections.length === 0) {
-    return "✅ 할 일 없음\n\n모든 과제와 학습이 완료되었습니다!";
-  }
-
+  if (sections.length === 0) return "✅ 할 일 없음\n\n모든 과제와 학습이 완료되었습니다!";
   return `📝 할 일 요약\n\n${sections.join("\n\n")}`;
 }
 
-// ── 정리 ─────────────────────────────────────────────────────────
+function formatUnsubmitted(data: unknown): string {
+  const items = Array.isArray(data) ? data : (data as { items?: unknown[] }).items || [];
+  if (items.length === 0) return "⚠️ 미제출 과제 없음";
 
-export async function closeMjuClient(): Promise<void> {
-  if (client) {
-    await client.close();
-    client = null;
-    transport = null;
-  }
+  const lines = (items as Array<{ title: string; courseTitle: string; dueLabel?: string; isExpired?: boolean }>).map(
+    (a) => `  ${a.isExpired ? "🔴" : "🟡"} ${a.title} (${a.courseTitle})${a.dueLabel ? ` — ${a.dueLabel}` : ""}`
+  );
+  return `⚠️ 미제출 과제 ${items.length}건\n\n${lines.join("\n")}`;
+}
+
+function formatDueAssignments(data: unknown): string {
+  const items = Array.isArray(data) ? data : (data as { items?: unknown[] }).items || [];
+  if (items.length === 0) return "⏰ 마감 임박 과제 없음";
+
+  const lines = (items as Array<{ title: string; courseTitle: string; dueLabel?: string }>).map(
+    (a) => `  ⏰ ${a.title} (${a.courseTitle})${a.dueLabel ? ` — ${a.dueLabel}` : ""}`
+  );
+  return `⏰ 마감 임박 ${items.length}건\n\n${lines.join("\n")}`;
+}
+
+function formatUnreadNotices(data: unknown): string {
+  const items = Array.isArray(data) ? data : (data as { items?: unknown[] }).items || [];
+  if (items.length === 0) return "🔔 새로운 공지 없음";
+
+  const lines = (items as Array<{ title: string; courseTitle?: string; postedAt?: string }>).map(
+    (n) => `  🔔 ${n.title}${n.courseTitle ? ` (${n.courseTitle})` : ""}`
+  );
+  return `🔔 안읽은 공지 ${items.length}건\n\n${lines.join("\n")}`;
+}
+
+function formatGeneric(data: unknown): string {
+  return JSON.stringify(data, null, 2).slice(0, 800);
 }

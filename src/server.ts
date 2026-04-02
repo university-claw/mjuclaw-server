@@ -8,7 +8,7 @@ import {
   sendCallback,
   sendCallbackWelcome,
 } from "./kakao";
-import { handleMjuRequest } from "./mju-tools";
+import { handleMjuRequest, mjuLogin } from "./mju-tools";
 import { runAgent } from "./nemoclaw";
 import { isVerified, onboardUser, resetSession, getStats } from "./session";
 import type { KakaoSkillRequest } from "./types";
@@ -16,6 +16,7 @@ import type { KakaoSkillRequest } from "./types";
 export const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, "..", "public")));
 
 const startedAt = Date.now();
 
@@ -43,7 +44,7 @@ app.get("/onboard", (req, res) => {
 
 // ── POST /onboard/submit — 크리덴셜 등록 ─────────────────────────
 
-app.post("/onboard/submit", (req, res) => {
+app.post("/onboard/submit", async (req, res) => {
   const { uid, studentId, password } = req.body;
 
   if (!uid || !studentId || !password) {
@@ -51,8 +52,18 @@ app.post("/onboard/submit", (req, res) => {
     return;
   }
 
+  // 1) mju-cli로 실제 로그인 검증 + 세션 생성
+  console.log(`[onboard] user=${String(uid).slice(0, 8)}... studentId=${studentId} — CLI 로그인 시도`);
+  const loginResult = await mjuLogin(uid, studentId, password);
+  if (!loginResult.success) {
+    console.log(`[onboard] CLI 로그인 실패: ${loginResult.message}`);
+    res.json(loginResult);
+    return;
+  }
+
+  // 2) 크리덴셜 암호화 저장 + 세션 등록
   const result = onboardUser(uid, studentId, password);
-  console.log(`[onboard] user=${String(uid).slice(0, 8)}... studentId=${studentId} → ${result.success}`);
+  console.log(`[onboard] user=${String(uid).slice(0, 8)}... → ${result.success}`);
   res.json(result);
 });
 
@@ -152,7 +163,7 @@ async function processMessage(userId: string, utterance: string): Promise<string
   const cmd = parseCommand(utterance);
   if (cmd) return handleCommand(userId, cmd.command, cmd.args);
 
-  // MJU 키워드 감지 → 호스트에서 직접 mju-mcp 도구 호출
+  // MJU 키워드 감지 → mju-cli 호출
   try {
     const mjuResult = await handleMjuRequest(userId, utterance);
     if (mjuResult) return mjuResult;

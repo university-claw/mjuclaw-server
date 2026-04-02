@@ -1,21 +1,40 @@
-# MJUClaw Server — 프로젝트 문서
+# CLAUDE.md
 
-> 최종 업데이트: 2026-04-02
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 프로젝트 개요
+## Project Overview
 
-명지대학교 카카오톡 채널을 통해 AI 에이전트(NemoClaw/OpenClaw) + 학사 서비스(LMS, MSI, UCheck, 도서관)를 사용할 수 있게 하는 서버.
+MJUClaw Server — 명지대학교 카카오톡 채널을 통해 AI 에이전트(NemoClaw/OpenClaw) + 학사 서비스(LMS, MSI, UCheck, 도서관)를 사용할 수 있게 하는 Express 서버.
 
 - **레포**: github.com/university-claw/mjuclaw-server
 - **관련 레포**: github.com/university-claw/mju-mcp (MCP 서버), github.com/nullhyeon/mju-cli (CLI 도구)
 
----
+## Build & Run
 
-## 아키텍처
+```bash
+npm install          # 의존성 설치
+npm run build        # tsc → dist/
+npm start            # node dist/index.js (프로덕션)
+npm run dev          # ts-node src/index.ts (개발)
+```
+
+mju-mcp 빌드 (별도 클론 후):
+```bash
+cd mju-mcp && npm install --include=dev && npx tsc
+```
+
+테스트 프레임워크 없음. curl로 수동 테스트:
+```bash
+curl http://localhost:3000/health
+curl -X POST http://localhost:3000/skill -H "Content-Type: application/json" \
+  -d '{"intent":{"id":"t","name":"t"},"userRequest":{"timezone":"Asia/Seoul","params":{},"block":{"id":"t","name":"t"},"utterance":"시간표","lang":null,"user":{"id":"test-user","type":"botUserKey","properties":{}}},"bot":{"id":"t","name":"t"},"action":{"name":"t","clientExtra":null,"params":{},"id":"t","detailParams":{}}}'
+```
+
+## Architecture
 
 ```
 카카오톡 유저
-    ↓ 메시지 (POST /skill)
+    ↓ POST /skill
 ┌──────────────────────────────────────────┐
 │  MJUClaw Server (Express, port 3000)     │
 │                                          │
@@ -32,175 +51,55 @@
      └───────────┘   └────────────────────┘
 ```
 
-### 핵심 설계 결정
+### Request Flow (server.ts)
 
-1. **mju-mcp는 호스트에서 subprocess로 실행** — 샌드박스 네트워크 정책이 mju.ac.kr 도메인을 차단해서, 호스트에서 직접 실행하는 방식으로 우회
-2. **NemoClaw는 블랙박스로 사용** — fork 없이 OpenShell SSH로 접속
-3. **카카오 콜백 API** — 5초 타임아웃 우회 필수. 오픈빌더 설정에서 "콜백 URL 발행" 활성화 필요
-4. **웹 온보딩** — 카카오톡 채팅으로 비밀번호를 받지 않고, 웹페이지(HTTPS)에서 입력받아 AES-256-GCM으로 암호화 저장
+`POST /skill` → 카카오 스킬 웹훅 엔트리포인트. 두 가지 모드:
 
----
+1. **콜백 모드** (`callbackUrl` 존재): 즉시 `useCallback: true` 응답 → 백그라운드에서 `processAsync()` 실행 → 결과를 callbackUrl로 POST
+2. **동기 모드** (콜백 없음): 4.5초 타임아웃 내에 응답 시도
 
-## 세션 히스토리 (2026-03-30 ~ 04-02)
+`processMessage()` 내부 라우팅:
+- `/reset`, `/help` → 슬래시 명령어 핸들러
+- 키워드 매치 (출석, 시간표, 성적 등) → `handleMjuRequest()` → mju-mcp 도구 호출
+- 나머지 → `runAgent()` → NemoClaw SSH 에이전트
 
-### Phase 1: 브릿지 서버 구축
-- Express 서버 처음부터 작성 (clawdbot-kakaotalk fork 안 함)
-- 카카오 스킬 API 타입 정의, 콜백 전송, 900자 분할
-- NemoClaw OpenShell SSH 브릿지 (telegram-bridge.js 패턴 참고)
-- 유저 세션 관리, 페어링 인증
-- **커밋**: `be8d45f` feat: NemoClaw KakaoTalk Bridge 초기 구현
+### Key Design Decisions
 
-### Phase 2: 웹 온보딩
-- `/pair` 코드 입력 → 웹페이지(학번/비밀번호) 방식으로 전환
-- GET /onboard?uid={kakaoId} 웹페이지, POST /onboard/submit API
-- AES-256-GCM 크리덴셜 암호화 (ENCRYPTION_KEY 환경변수)
-- basicCard + webLink 버튼으로 카카오톡 웰컴 카드
-- **커밋**: `1f9cf1b` feat: 웹 온보딩으로 인증 방식 전환
+1. **mju-mcp는 호스트에서 subprocess(stdio)로 실행** — 샌드박스 프록시(10.200.0.1:3128)가 mju.ac.kr CONNECT 터널을 차단하여 샌드박스 내 실행 불가. MCP SDK Client가 `node mju-mcp/dist/index.js`를 직접 spawn.
+2. **NemoClaw는 블랙박스** — fork 없이 `openshell sandbox ssh-config` → SSH로 `openclaw agent` 명령 실행. stdout에서 셋업 라인 필터링 후 응답 추출.
+3. **카카오 5초 타임아웃 우회** — 오픈빌더 "콜백 URL 발행" 활성화 필수. 없으면 callbackUrl이 req.body에 포함되지 않음.
+4. **유저별 동시성 제어** — nemoclaw.ts의 `enqueue()` 함수가 같은 userId의 SSH 요청을 Promise 체인으로 직렬화.
 
-### Phase 3: 카카오톡 연동 테스트
-- Cloudflare Quick Tunnel로 외부 노출
-- 카카오 i 오픈빌더 스킬 등록 + 폴백 블록 연결
-- 콜백 URL 발행 활성화 (오픈빌더 설정 → 콜백 설정)
-- callbackUrl 미포함 문제 디버깅 → 콜백 URL 발행 토글 발견
-- 동기 모드 4.5초 타임아웃 에이전트 호출 추가
-- NemoClaw stdout 필터에 [gateway] 라인 추가
-- **커밋**: `2f3191a` fix: 콜백 비동기 처리 + gateway 로그 필터링
+### Module Responsibilities
 
-### Phase 4: NemoClaw 샌드박스 구성
-- `nemoclaw onboard` → 샌드박스 `mjuclaw` 생성
-- 모델: ollama-local → qwen3.5:0.8b (로컬) → qwen3.5:397b-cloud (NVIDIA 클라우드 경유 Ollama)
-- qwen3.5:9b는 16GB Mac에서 메모리 부족으로 사용 불가
-- NVIDIA API 키를 Ollama에 전달: `launchctl setenv NVIDIA_API_KEY ...` + Ollama 재시작
+- **server.ts** — Express 라우트, 메시지 라우팅 (키워드 → mju-tools / 일반 → nemoclaw), 동기/비동기 분기
+- **mju-tools.ts** — MCP 클라이언트 싱글턴, 키워드→도구 매핑 (`KEYWORD_MAP` 배열), 출석 체이닝 (과목목록 → 각 과목 출석 조회), 각 도구별 카카오톡 포맷터
+- **nemoclaw.ts** — OpenShell SSH 실행, stdout 필터링, 유저별 Promise 큐
+- **kakao.ts** — 카카오 응답 빌더 (simpleText, basicCard, 콜백 POST), 900자/3버블 분할
+- **session.ts** — 인메모리 세션 + 파일 기반 크리덴셜 (AES-256-GCM), 24시간 TTL 자동 정리
+- **config.ts** — 환경변수 로드. ENCRYPTION_KEY 미설정 시 임시 키 생성 (재시작 시 복호화 불가 경고)
+- **types.ts** — 카카오 스킬 API 요청/응답 타입, 내부 세션/크리덴셜 타입
 
-### Phase 5: mju-mcp 설치 시도 (샌드박스 내)
-- mju-mcp를 샌드박스에 업로드 (tar pipe over SSH, 호스트에서 빌드)
-- OpenClaw 플러그인 등록 시도:
-  - `openclaw.plugin.json` 매니페스트 필요
-  - `package.json`에 `openclaw.extensions` 필드 필요
-  - top-level await 호환성 문제 → `src/plugin.ts` 별도 엔트리포인트 필요
-  - extensions 디렉토리 symlink 문제 → 직접 복사로 해결
-  - **최종: loaded 상태 달성**
-- 네트워크 정책에 mju.ac.kr 도메인 추가 (여러 형식 시도):
-  - `access: full` → 403
-  - `protocol: rest, tls: terminate` → 403
-  - `tls: passthrough` → 403
-  - 프록시(10.200.0.1:3128)가 CONNECT 터널 자체를 차단
-  - **결론: 샌드박스 내에서 mju.ac.kr 접근 불가**
+### Data Flow Constraints
 
-### Phase 6: mju-mcp 호스트 실행으로 전환
-- MCP SDK 클라이언트를 bridge에 추가
-- mju-mcp를 호스트에서 subprocess(stdio)로 실행
-- 키워드 감지 → 도구 자동 호출 (allCourses 파라미터 활용)
-- 출석 조회: 과목 목록 → 각 과목 출석 자동 체이닝
-- LMS 과목 ID ≠ UCheck 과목 ID → 과목명으로 검색하도록 수정
-- **커밋**: `4d05f2e` feat: mju-mcp 호스트 직접 실행으로 학사 서비스 연동
+- 카카오 말풍선: 최대 900자 × 3개 (`kakao.ts:splitText`)
+- MCP 클라이언트: 싱글턴 (`mju-tools.ts:client`). 첫 호출 시 subprocess spawn, 이후 재사용. `closeMjuClient()`로 정리 가능하나 현재 shutdown에서 미호출.
+- 출석 조회: LMS 과목 ID ≠ UCheck 과목 ID이므로, 과목명(문자열)으로 UCheck 검색. `handleAttendance()`에서 과목 목록 → 순차 출석 조회 체이닝.
+- mju-mcp에 전달되는 학번이 현재 하드코딩됨 (`mju-tools.ts:24` — `MJU_USERNAME: "60212158"`). TODO: 유저별 학번 매핑 필요.
 
-### Phase 7: 카카오톡 포맷 최적화
-- 전체 도구 응답 포맷터 추가 (시간표, 성적, 졸업요건, 수강과목, 할 일, 출석 등)
-- 출석: 요약 + 문제 회차만 표시
-- 할 일: 미제출(🔴만료/🟡진행) + 마감임박 + 안읽은공지 통합
-- 시간표: 요일별 그룹핑
-- **커밋**: `533d96d` feat: 전체 학사 도구 카카오톡 포맷터 추가
-
-### Phase 8: README + 리네이밍
-- nemoclaw-kakao-bridge → mjuclaw-server (v0.2.0)
-- README 전면 재작성
-- GitHub 레포 이름 변경: university-claw/mjuclaw-server
-- **커밋**: `6dbbb24` docs: README 전면 재작성 + 프로젝트 리네이밍
-
-### Phase 9: 배포 계획
-- Oracle Cloud Free Tier (서울/춘천) VM 추천 — 4 OCPU ARM, 24GB RAM, 200GB, $0
-- 폴백: Contabo Tokyo ~$7/월
-- VM 인스턴스 생성 중 (진행 중)
-
----
-
-## 알려진 이슈
-
-### 해결됨
-- callbackUrl 미포함 → 오픈빌더 "콜백 URL 발행" 토글 활성화로 해결
-- qwen3.5:0.8b tool calling 불가 → NVIDIA 클라우드 모델(397b)로 전환
-- LMS 과목 ID ≠ UCheck ID → 과목명 검색으로 해결
-- NemoClaw stdout [gateway] 라인 노출 → 필터 추가
-
-### 미해결
-- **샌드박스 네트워크**: mju.ac.kr 도메인이 프록시(10.200.0.1:3128)에 의해 차단됨. 정책 추가로 해결 안 됨. 현재 호스트 실행으로 우회 중
-- **Cloudflare Quick Tunnel URL 변경**: 재시작마다 URL 바뀜 → SERVER_URL + 오픈빌더 스킬 URL 수동 변경 필요. 서버 배포로 해결 예정
-- **에이전트 비밀번호 노출**: AGENTS.md에 "크리덴셜 응답에 포함 금지" 규칙 추가했으나, 모델이 무시할 수 있음
-- **샌드박스 DNS 실패**: `getent hosts github.com` 실패. git clone 등 샌드박스 내 외부 접근 제한적
-
----
-
-## 환경 설정 체크리스트
-
-### .env
-```
-NVIDIA_API_KEY=nvapi-xxxxx
-SANDBOX_NAME=mjuclaw
-PORT=3000
-SERVER_URL=https://<fixed-domain>
-ENCRYPTION_KEY=<64자 hex>
-ADMIN_KAKAO_ID=<관리자 카카오 ID>
-```
-
-### NemoClaw
-- `openshell gateway start` → `nemoclaw onboard` (또는 `--resume`)
-- 추론 모델: `openshell inference set --provider ollama-local --model "qwen3.5:397b-cloud"`
-- Ollama에 NVIDIA API 키 필요: `launchctl setenv NVIDIA_API_KEY <key>` + Ollama 재시작
-
-### 카카오 i 오픈빌더
-- 스킬 URL: `https://<domain>/skill`
-- **콜백 URL 발행**: 반드시 ON (설정 → 콜백 설정 → "AI 챗봇 구현에 콜백 API가 필요한 경우")
-- 폴백 블록 → 스킬 데이터 사용 → 위 스킬 연결
-- 변경 후 **배포** 필수
-
-### mju-mcp
-- `mju-mcp/` 디렉토리에 빌드본 배치 (gitignore 대상)
-- 호스트에서 빌드: `cd mju-mcp && npm install --include=dev && npx tsc`
-
----
-
-## 프로젝트 구조
+## Environment Variables
 
 ```
-~/Codes/projects/mjuclaw/kakao/          ← mjuclaw-server 레포
-├── src/
-│   ├── index.ts        # 엔트리포인트, graceful shutdown
-│   ├── server.ts       # Express: /skill, /health, /onboard
-│   ├── kakao.ts        # 카카오 응답 포맷 (simpleText, basicCard, 콜백)
-│   ├── nemoclaw.ts     # OpenShell SSH → OpenClaw 에이전트
-│   ├── mju-tools.ts    # mju-mcp MCP 클라이언트, 키워드 감지, 포맷터
-│   ├── session.ts      # 세션 + 크리덴셜 (AES-256-GCM)
-│   ├── config.ts       # 환경변수
-│   └── types.ts        # 타입 정의
-├── public/
-│   └── onboard.html    # 학교 인증 웹페이지
-├── mju-mcp/            # mju-mcp 빌드본 (gitignore)
-├── data/               # credentials.json 등 (gitignore)
-├── .env                # 환경변수 (gitignore)
-├── CLAUDE.md           # 이 파일
-└── README.md
+NVIDIA_API_KEY      # NVIDIA 추론 엔드포인트 키
+SANDBOX_NAME        # NemoClaw 샌드박스 이름 (default: mjuclaw)
+PORT                # 서버 포트 (default: 3000)
+SERVER_URL          # 외부 URL (온보딩 버튼 링크용)
+ENCRYPTION_KEY      # AES-256 키, hex 64자
+ADMIN_KAKAO_ID      # 자동 인증 관리자 카카오 ID
 ```
 
----
+## Known Issues
 
-## 다음 단계
-
-1. **Oracle Cloud 배포** — VM 인스턴스 생성 + Docker + 고정 IP + 서버 세팅
-2. **mju-cli skill 방식 검토** — mju-mcp 대신 mju-cli를 OpenClaw skill로 등록하여 에이전트가 직접 CLI 호출
-3. **유저별 샌드박스** — 현재 단일 샌드박스 + session-id → 유저별 독립 디렉토리 + 경량 샌드박스
-4. **고정 도메인** — Cloudflare 고정 터널 또는 서버 직접 도메인
-5. **다중 유저 크리덴셜** — 현재 mju-mcp에 하드코딩된 학번 → 유저별 크리덴셜 동적 전달
-
----
-
-## 커밋 히스토리
-
-```
-be8d45f feat: NemoClaw KakaoTalk Bridge 초기 구현
-1f9cf1b feat: 웹 온보딩으로 인증 방식 전환
-2f3191a fix: 콜백 비동기 처리 + gateway 로그 필터링
-4d05f2e feat: mju-mcp 호스트 직접 실행으로 학사 서비스 연동
-533d96d feat: 전체 학사 도구 카카오톡 포맷터 추가
-6dbbb24 docs: README 전면 재작성 + 프로젝트 리네이밍
-```
+- **학번 하드코딩**: mju-tools.ts에서 MJU_USERNAME이 고정값. 다중 유저 크리덴셜 동적 전달 미구현.
+- **Cloudflare Quick Tunnel**: 재시작마다 URL 변경 → SERVER_URL + 오픈빌더 스킬 URL 수동 업데이트 필요.
+- **MCP 클라이언트 미정리**: graceful shutdown 시 `closeMjuClient()` 호출 없음.
