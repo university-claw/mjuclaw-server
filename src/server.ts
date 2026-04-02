@@ -8,7 +8,7 @@ import {
   sendCallback,
   sendCallbackWelcome,
 } from "./kakao";
-import { handleMjuRequest, mjuLogin } from "./mju-tools";
+import { fetchMjuData, mjuLogin } from "./mju-tools";
 import { runAgent } from "./nemoclaw";
 import { isVerified, onboardUser, resetSession, getStats } from "./session";
 import type { KakaoSkillRequest } from "./types";
@@ -163,22 +163,40 @@ async function processMessage(userId: string, utterance: string): Promise<string
   const cmd = parseCommand(utterance);
   if (cmd) return handleCommand(userId, cmd.command, cmd.args);
 
-  // MJU 키워드 감지 → mju-cli 호출
+  // 1) 키워드 매칭 → mju-cli로 학사 데이터 조회
+  let mjuContext = "";
+  let fallbackText = "";
   try {
-    const mjuResult = await handleMjuRequest(userId, utterance);
-    if (mjuResult) return mjuResult;
+    const mjuResult = await fetchMjuData(userId, utterance);
+    if (mjuResult) {
+      if (!mjuResult.data) {
+        // 에러 발생 시 폴백 텍스트 바로 반환
+        return mjuResult.fallbackText;
+      }
+      // 데이터를 NemoClaw 컨텍스트로 준비
+      const dataStr = typeof mjuResult.data === "string"
+        ? mjuResult.data
+        : JSON.stringify(mjuResult.data, null, 2);
+      mjuContext = `\n\n[학사 데이터: ${mjuResult.description}]\n${dataStr}`;
+      fallbackText = mjuResult.fallbackText;
+      console.log(`[mju] data fetched: ${mjuResult.description} (${dataStr.length} chars)`);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[mju] error: ${msg}`);
-    return `학교 서비스 조회 중 오류가 발생했습니다: ${msg}`;
   }
 
-  // 일반 메시지 → OpenClaw 에이전트
+  // 2) NemoClaw에 질문 + 학사 데이터 전달
   try {
-    return await runAgent(utterance, userId);
+    const agentMessage = mjuContext
+      ? `${utterance}${mjuContext}`
+      : utterance;
+    return await runAgent(agentMessage, userId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[skill] agent error: ${msg}`);
+    // NemoClaw 실패 시 학사 데이터 폴백
+    if (fallbackText) return fallbackText;
     return "에이전트 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.";
   }
 }

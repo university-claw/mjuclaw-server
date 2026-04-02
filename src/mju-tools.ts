@@ -3,6 +3,7 @@ import path from "path";
 import { getDecryptedCredentials } from "./session";
 
 const MJU_CLI = path.join(__dirname, "..", "mju-cli", "dist", "main.js");
+const SOFT_LIMIT = 500; // 카카오 말풍선 소프트 리밋
 const USER_DATA_DIR = path.join(__dirname, "..", "data", "users");
 
 // ── CLI 실행 ────────────────────────────────────────────────────────
@@ -65,21 +66,22 @@ interface IntentEntry {
   formatter: (data: unknown) => string;
 }
 
+// 구체적 키워드가 앞에 와야 함 (예: "졸업학점" > "학점", "미제출" > "과제")
 const KEYWORD_MAP: IntentEntry[] = [
-  // 출석 — 과목별 체이닝이 필요하므로 별도 핸들러
+  // 출석
   { keywords: ["출석", "출결", "결석", "지각"], command: [], description: "출석 현황", emoji: "📋", formatter: () => "" },
-  // LMS helper 커맨드
-  { keywords: ["과제", "숙제", "레포트", "할 일", "할일", "투두"], command: ["lms", "+action-items", "--all-courses"], description: "할 일 목록", emoji: "📝", formatter: formatActionItems },
-  { keywords: ["미제출"], command: ["lms", "+unsubmitted", "--all-courses"], description: "미제출 과제", emoji: "⚠️", formatter: formatUnsubmitted },
-  { keywords: ["마감", "데드라인", "임박"], command: ["lms", "+due-assignments", "--all-courses"], description: "마감 임박 과제", emoji: "⏰", formatter: formatDueAssignments },
+  // 복합 키워드 (구체적인 것 먼저)
   { keywords: ["안읽은 공지", "새 공지"], command: ["lms", "+unread-notices", "--all-courses"], description: "안읽은 공지", emoji: "🔔", formatter: formatUnreadNotices },
+  { keywords: ["미제출"], command: ["lms", "+unsubmitted", "--all-courses"], description: "미제출 과제", emoji: "⚠️", formatter: formatUnsubmitted },
+  { keywords: ["마감", "데드라인", "임박", "언제까지"], command: ["lms", "+due-assignments", "--all-courses"], description: "마감 임박 과제", emoji: "⏰", formatter: formatDueAssignments },
   { keywords: ["미수강", "온라인 강의", "온라인강의"], command: ["lms", "+incomplete-online", "--all-courses"], description: "미수강 온라인 학습", emoji: "🎬", formatter: formatGeneric },
-  // MSI
-  { keywords: ["시간표", "수업시간", "강의시간"], command: ["msi", "timetable"], description: "시간표", emoji: "🕐", formatter: formatTimetable },
-  { keywords: ["성적", "학점", "점수"], command: ["msi", "current-grades"], description: "이번 학기 성적", emoji: "📊", formatter: formatGrades },
-  { keywords: ["성적이력", "전체성적", "전체 성적"], command: ["msi", "grade-history"], description: "성적 이력", emoji: "📈", formatter: formatGeneric },
+  // MSI — 졸업이 성적/학점보다 먼저 (졸업학점 → 졸업, not 학점)
   { keywords: ["졸업", "졸업요건", "졸업학점"], command: ["msi", "graduation"], description: "졸업 요건", emoji: "🎓", formatter: formatGraduation },
-  // LMS 기본
+  { keywords: ["성적이력", "전체성적", "전체 성적"], command: ["msi", "grade-history"], description: "성적 이력", emoji: "📈", formatter: formatGeneric },
+  { keywords: ["성적", "학점", "점수"], command: ["msi", "current-grades"], description: "이번 학기 성적", emoji: "📊", formatter: formatGrades },
+  { keywords: ["시간표", "수업시간", "강의시간"], command: ["msi", "timetable"], description: "시간표", emoji: "🕐", formatter: formatTimetable },
+  // LMS 기본 — "과제"는 구체적 키워드 뒤에
+  { keywords: ["과제", "숙제", "레포트", "할 일", "할일", "투두"], command: ["lms", "+action-items", "--all-courses"], description: "할 일 목록", emoji: "📝", formatter: formatActionItems },
   { keywords: ["과목", "수강", "강의목록"], command: ["lms", "courses", "list"], description: "수강 과목", emoji: "📚", formatter: formatCourses },
   { keywords: ["공지", "알림"], command: ["lms", "+unread-notices", "--all-courses"], description: "공지사항", emoji: "📢", formatter: formatUnreadNotices },
   // 도서관
@@ -99,7 +101,16 @@ export function detectMjuIntent(utterance: string): IntentEntry | null {
 
 // ── 스마트 핸들러 ────────────────────────────────────────────────────
 
-export async function handleMjuRequest(kakaoId: string, utterance: string): Promise<string | null> {
+/** 학사 데이터 조회 결과. data가 있으면 NemoClaw에 컨텍스트로 전달할 수 있다. */
+export interface MjuDataResult {
+  description: string;
+  data: unknown;
+  /** 포맷터로 만든 폴백 텍스트 (NemoClaw 실패 시 사용) */
+  fallbackText: string;
+}
+
+/** 키워드 매칭 → mju-cli 데이터 조회. 매칭 안 되면 null. */
+export async function fetchMjuData(kakaoId: string, utterance: string): Promise<MjuDataResult | null> {
   const intent = detectMjuIntent(utterance);
   if (!intent) return null;
 
@@ -107,7 +118,8 @@ export async function handleMjuRequest(kakaoId: string, utterance: string): Prom
 
   // 출석 — 특수 체이닝
   if (intent.keywords[0] === "출석") {
-    return await handleAttendance(kakaoId);
+    const text = await handleAttendance(kakaoId);
+    return { description: intent.description, data: text, fallbackText: text };
   }
 
   try {
@@ -116,13 +128,19 @@ export async function handleMjuRequest(kakaoId: string, utterance: string): Prom
     // CLI가 에러 JSON을 반환한 경우
     if (data && typeof data === "object" && "error" in (data as Record<string, unknown>)) {
       const errObj = (data as { error: { message?: string } }).error;
-      return `${intent.emoji} ${intent.description}\n\n오류: ${errObj.message || "알 수 없는 오류"}`;
+      const errText = `${intent.emoji} ${intent.description}\n\n오류: ${errObj.message || "알 수 없는 오류"}`;
+      return { description: intent.description, data: null, fallbackText: errText };
     }
 
-    return intent.formatter(data);
+    return {
+      description: intent.description,
+      data,
+      fallbackText: intent.formatter(data),
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return `${intent.emoji} ${intent.description}\n\n조회 실패: ${msg}`;
+    const errText = `${intent.emoji} ${intent.description}\n\n조회 실패: ${msg}`;
+    return { description: intent.description, data: null, fallbackText: errText };
   }
 }
 
@@ -214,6 +232,23 @@ interface CourseSummary {
   professor?: string;
 }
 
+// ── 포맷터 유틸 ─────────────────────────────────────────────────────
+
+/** 헤더 + 항목 리스트를 SOFT_LIMIT 이내로 조립. 넘치면 항목을 자른다. */
+function buildList(header: string, lines: string[], sep = "\n"): string {
+  let result = header;
+  for (let i = 0; i < lines.length; i++) {
+    const next = result + sep + lines[i];
+    if (next.length > SOFT_LIMIT) {
+      const remaining = lines.length - i;
+      result += `${sep}  ...외 ${remaining}건`;
+      break;
+    }
+    result = next;
+  }
+  return result;
+}
+
 // ── 포맷터 ──────────────────────────────────────────────────────────
 
 function formatAttendanceSummary(courseName: string, att: UcheckAttendance): string {
@@ -258,7 +293,7 @@ function formatTimetable(data: unknown): string {
     }
   }
 
-  return `🕐 시간표\n\n${lines.join("\n")}`;
+  return buildList("🕐 시간표\n", lines);
 }
 
 function formatGrades(data: unknown): string {
@@ -272,7 +307,7 @@ function formatGrades(data: unknown): string {
   });
 
   const header = d.termLabel ? `${d.year}년 ${d.termLabel}` : "";
-  return `📊 이번 학기 성적 ${header}\n총 ${d.items.length}과목\n\n${lines.join("\n")}`;
+  return buildList(`📊 이번 학기 성적 ${header} (${d.items.length}과목)\n`, lines);
 }
 
 function formatGraduation(data: unknown): string {
@@ -287,7 +322,7 @@ function formatGraduation(data: unknown): string {
     return `  ${bar} ${g.label}: ${g.earned ?? "?"}/${g.required ?? "?"} (부족 ${g.gap ?? 0})`;
   });
 
-  return `🎓 졸업요건 — ${status}\n\n${lines.join("\n")}`;
+  return buildList(`🎓 졸업요건 — ${status}\n`, lines);
 }
 
 function formatCourses(data: unknown): string {
@@ -295,7 +330,7 @@ function formatCourses(data: unknown): string {
   if (!d.courses || d.courses.length === 0) return "📚 수강과목\n\n등록된 과목이 없습니다.";
 
   const lines = d.courses.map((c) => `  📚 ${c.title}${c.professor ? ` (${c.professor})` : ""}`);
-  return `📚 수강과목 ${d.courses.length}개\n\n${lines.join("\n")}`;
+  return buildList(`📚 수강과목 ${d.courses.length}개\n`, lines);
 }
 
 function formatActionItems(data: unknown): string {
@@ -330,7 +365,7 @@ function formatActionItems(data: unknown): string {
   }
 
   if (sections.length === 0) return "✅ 할 일 없음\n\n모든 과제와 학습이 완료되었습니다!";
-  return `📝 할 일 요약\n\n${sections.join("\n\n")}`;
+  return buildList("📝 할 일 요약\n", sections, "\n\n");
 }
 
 function formatUnsubmitted(data: unknown): string {
@@ -340,7 +375,7 @@ function formatUnsubmitted(data: unknown): string {
   const lines = (items as Array<{ title: string; courseTitle: string; dueLabel?: string; isExpired?: boolean }>).map(
     (a) => `  ${a.isExpired ? "🔴" : "🟡"} ${a.title} (${a.courseTitle})${a.dueLabel ? ` — ${a.dueLabel}` : ""}`
   );
-  return `⚠️ 미제출 과제 ${items.length}건\n\n${lines.join("\n")}`;
+  return buildList(`⚠️ 미제출 과제 ${items.length}건\n`, lines);
 }
 
 function formatDueAssignments(data: unknown): string {
@@ -350,7 +385,7 @@ function formatDueAssignments(data: unknown): string {
   const lines = (items as Array<{ title: string; courseTitle: string; dueLabel?: string }>).map(
     (a) => `  ⏰ ${a.title} (${a.courseTitle})${a.dueLabel ? ` — ${a.dueLabel}` : ""}`
   );
-  return `⏰ 마감 임박 ${items.length}건\n\n${lines.join("\n")}`;
+  return buildList(`⏰ 마감 임박 ${items.length}건\n`, lines);
 }
 
 function formatUnreadNotices(data: unknown): string {
@@ -360,9 +395,11 @@ function formatUnreadNotices(data: unknown): string {
   const lines = (items as Array<{ title: string; courseTitle?: string; postedAt?: string }>).map(
     (n) => `  🔔 ${n.title}${n.courseTitle ? ` (${n.courseTitle})` : ""}`
   );
-  return `🔔 안읽은 공지 ${items.length}건\n\n${lines.join("\n")}`;
+  return buildList(`🔔 안읽은 공지 ${items.length}건\n`, lines);
 }
 
 function formatGeneric(data: unknown): string {
-  return JSON.stringify(data, null, 2).slice(0, 800);
+  const json = JSON.stringify(data, null, 2);
+  if (json.length <= SOFT_LIMIT) return json;
+  return json.slice(0, SOFT_LIMIT - 15) + "\n\n...(생략됨)";
 }

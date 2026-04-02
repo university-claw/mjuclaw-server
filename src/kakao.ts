@@ -2,8 +2,7 @@ import https from "https";
 import http from "http";
 import type { KakaoSkillResponse, KakaoSimpleText, KakaoOutput } from "./types";
 
-const MAX_BUBBLE_CHARS = 900;
-const MAX_BUBBLES = 3;
+const MAX_CHARS = 900;
 
 // ── 즉시 응답 (useCallback: true) ────────────────────────────────
 
@@ -18,14 +17,11 @@ export function createImmediateResponse(text: string): KakaoSkillResponse {
 // ── 동기 텍스트 응답 (callbackUrl 없을 때) ──────────────────────
 
 export function createTextResponse(text: string): KakaoSkillResponse {
-  const chunks = splitText(text);
-  const outputs: KakaoSimpleText[] = chunks.map((chunk) => ({
-    simpleText: { text: chunk },
-  }));
-
   return {
     version: "2.0",
-    template: { outputs },
+    template: {
+      outputs: [{ simpleText: { text: truncate(text) } }],
+    },
   };
 }
 
@@ -58,14 +54,11 @@ export function createWelcomeResponse(onboardUrl: string): KakaoSkillResponse {
 // ── 콜백 전송 ────────────────────────────────────────────────────
 
 export async function sendCallback(callbackUrl: string, text: string): Promise<void> {
-  const chunks = splitText(text);
-  const outputs: KakaoSimpleText[] = chunks.map((chunk) => ({
-    simpleText: { text: chunk },
-  }));
-
   const body: KakaoSkillResponse = {
     version: "2.0",
-    template: { outputs },
+    template: {
+      outputs: [{ simpleText: { text: truncate(text) } }],
+    },
   };
 
   return new Promise((resolve, reject) => {
@@ -149,22 +142,9 @@ export async function sendCallbackWelcome(callbackUrl: string, onboardUrl: strin
   });
 }
 
-// ── 텍스트 분할 (900자 단위, 최대 3버블) ─────────────────────────
+// ── 텍스트 자르기 (단일 버블, 900자 하드 리밋) ──────────────────
 
-function splitText(text: string): string[] {
-  if (text.length <= MAX_BUBBLE_CHARS) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0 && chunks.length < MAX_BUBBLES) {
-    if (chunks.length === MAX_BUBBLES - 1 && remaining.length > MAX_BUBBLE_CHARS) {
-      chunks.push(remaining.slice(0, MAX_BUBBLE_CHARS - 20) + "\n\n...내용이 생략되었습니다.");
-      break;
-    }
-    chunks.push(remaining.slice(0, MAX_BUBBLE_CHARS));
-    remaining = remaining.slice(MAX_BUBBLE_CHARS);
-  }
-
-  return chunks;
+function truncate(text: string): string {
+  if (text.length <= MAX_CHARS) return text;
+  return text.slice(0, MAX_CHARS - 15) + "\n\n...(생략됨)";
 }
