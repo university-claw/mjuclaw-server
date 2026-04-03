@@ -208,7 +208,7 @@ async function processMessage(userId: string, utterance: string): Promise<Proces
     const viewId = storeView({
       dataType: mjuResult.dataType,
       title: `${mjuResult.description}`,
-      summary: aiResponse.slice(0, 200),
+      summary: aiResponse.split("\n")[0].slice(0, 80),
       rawData: mjuResult.data,
       aiResponse,
     });
@@ -216,7 +216,7 @@ async function processMessage(userId: string, utterance: string): Promise<Proces
       type: "card",
       viewId,
       title: mjuResult.description,
-      summary: aiResponse.slice(0, 200),
+      summary: aiResponse.split("\n")[0].slice(0, 80),
     };
   }
 

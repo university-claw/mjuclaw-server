@@ -4,7 +4,7 @@ import { config } from "./config";
 import type { KakaoSkillResponse, KakaoOutput, ProcessResult } from "./types";
 
 const MAX_CHARS = 900;
-const MAX_DESC = 200; // basicCard description 제한
+const MAX_DESC = 80; // basicCard description — 카드에는 한두 줄만
 
 // ── 즉시 응답 (useCallback: true) ────────────────────────────────
 
@@ -35,7 +35,6 @@ export function createCardResponse(title: string, description: string, viewUrl: 
       basicCard: {
         title,
         description: truncateDesc(description),
-        thumbnail: { imageUrl: `${config.serverUrl}/myongmyong.png` },
         buttons: [
           { action: "webLink", label: "자세히 보기", webLinkUrl: viewUrl },
         ],
