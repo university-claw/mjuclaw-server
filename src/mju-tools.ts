@@ -61,6 +61,7 @@ export async function mjuLogin(kakaoId: string, studentId: string, password: str
 interface IntentEntry {
   keywords: string[];
   command: string[];        // mju CLI 서브커맨드 + 옵션
+  dataType: string;         // view-store 데이터 타입 식별자
   description: string;
   emoji: string;
   formatter: (data: unknown) => string;
@@ -69,24 +70,24 @@ interface IntentEntry {
 // 구체적 키워드가 앞에 와야 함 (예: "졸업학점" > "학점", "미제출" > "과제")
 const KEYWORD_MAP: IntentEntry[] = [
   // 출석
-  { keywords: ["출석", "출결", "결석", "지각"], command: [], description: "출석 현황", emoji: "📋", formatter: () => "" },
+  { keywords: ["출석", "출결", "결석", "지각"], command: [], dataType: "attendance", description: "출석 현황", emoji: "📋", formatter: () => "" },
   // 복합 키워드 (구체적인 것 먼저)
-  { keywords: ["안읽은 공지", "새 공지"], command: ["lms", "+unread-notices", "--all-courses"], description: "안읽은 공지", emoji: "🔔", formatter: formatUnreadNotices },
-  { keywords: ["미제출"], command: ["lms", "+unsubmitted", "--all-courses"], description: "미제출 과제", emoji: "⚠️", formatter: formatUnsubmitted },
-  { keywords: ["마감", "데드라인", "임박", "언제까지"], command: ["lms", "+due-assignments", "--all-courses"], description: "마감 임박 과제", emoji: "⏰", formatter: formatDueAssignments },
-  { keywords: ["미수강", "온라인 강의", "온라인강의"], command: ["lms", "+incomplete-online", "--all-courses"], description: "미수강 온라인 학습", emoji: "🎬", formatter: formatGeneric },
-  // MSI — 졸업이 성적/학점보다 먼저 (졸업학점 → 졸업, not 학점)
-  { keywords: ["졸업", "졸업요건", "졸업학점"], command: ["msi", "graduation"], description: "졸업 요건", emoji: "🎓", formatter: formatGraduation },
-  { keywords: ["성적이력", "전체성적", "전체 성적"], command: ["msi", "grade-history"], description: "성적 이력", emoji: "📈", formatter: formatGeneric },
-  { keywords: ["성적", "학점", "점수"], command: ["msi", "current-grades"], description: "이번 학기 성적", emoji: "📊", formatter: formatGrades },
-  { keywords: ["시간표", "수업시간", "강의시간"], command: ["msi", "timetable"], description: "시간표", emoji: "🕐", formatter: formatTimetable },
-  // LMS 기본 — "과제"는 구체적 키워드 뒤에
-  { keywords: ["과제", "숙제", "레포트", "할 일", "할일", "투두"], command: ["lms", "+action-items", "--all-courses"], description: "할 일 목록", emoji: "📝", formatter: formatActionItems },
-  { keywords: ["과목", "수강", "강의목록"], command: ["lms", "courses", "list"], description: "수강 과목", emoji: "📚", formatter: formatCourses },
-  { keywords: ["공지", "알림"], command: ["lms", "+unread-notices", "--all-courses"], description: "공지사항", emoji: "📢", formatter: formatUnreadNotices },
+  { keywords: ["안읽은 공지", "새 공지"], command: ["lms", "+unread-notices", "--all-courses"], dataType: "unread-notices", description: "안읽은 공지", emoji: "🔔", formatter: formatUnreadNotices },
+  { keywords: ["미제출"], command: ["lms", "+unsubmitted", "--all-courses"], dataType: "unsubmitted", description: "미제출 과제", emoji: "⚠️", formatter: formatUnsubmitted },
+  { keywords: ["마감", "데드라인", "임박", "언제까지"], command: ["lms", "+due-assignments", "--all-courses"], dataType: "due-assignments", description: "마감 임박 과제", emoji: "⏰", formatter: formatDueAssignments },
+  { keywords: ["미수강", "온라인 강의", "온라인강의"], command: ["lms", "+incomplete-online", "--all-courses"], dataType: "incomplete-online", description: "미수강 온라인 학습", emoji: "🎬", formatter: formatGeneric },
+  // MSI
+  { keywords: ["졸업", "졸업요건", "졸업학점"], command: ["msi", "graduation"], dataType: "graduation", description: "졸업 요건", emoji: "🎓", formatter: formatGraduation },
+  { keywords: ["성적이력", "전체성적", "전체 성적"], command: ["msi", "grade-history"], dataType: "grade-history", description: "성적 이력", emoji: "📈", formatter: formatGeneric },
+  { keywords: ["성적", "학점", "점수"], command: ["msi", "current-grades"], dataType: "grades", description: "이번 학기 성적", emoji: "📊", formatter: formatGrades },
+  { keywords: ["시간표", "수업시간", "강의시간"], command: ["msi", "timetable"], dataType: "timetable", description: "시간표", emoji: "🕐", formatter: formatTimetable },
+  // LMS
+  { keywords: ["과제", "숙제", "레포트", "할 일", "할일", "투두"], command: ["lms", "+action-items", "--all-courses"], dataType: "action-items", description: "할 일 목록", emoji: "📝", formatter: formatActionItems },
+  { keywords: ["과목", "수강", "강의목록"], command: ["lms", "courses", "list"], dataType: "courses", description: "수강 과목", emoji: "📚", formatter: formatCourses },
+  { keywords: ["공지", "알림"], command: ["lms", "+unread-notices", "--all-courses"], dataType: "unread-notices", description: "공지사항", emoji: "📢", formatter: formatUnreadNotices },
   // 도서관
-  { keywords: ["스터디룸", "스터디 룸"], command: ["library", "study-rooms", "list"], description: "스터디룸 현황", emoji: "🏫", formatter: formatGeneric },
-  { keywords: ["열람실", "좌석"], command: ["library", "reading-rooms", "list"], description: "열람실 현황", emoji: "📖", formatter: formatGeneric },
+  { keywords: ["스터디룸", "스터디 룸"], command: ["library", "study-rooms", "list"], dataType: "study-rooms", description: "스터디룸 현황", emoji: "🏫", formatter: formatGeneric },
+  { keywords: ["열람실", "좌석"], command: ["library", "reading-rooms", "list"], dataType: "reading-rooms", description: "열람실 현황", emoji: "📖", formatter: formatGeneric },
 ];
 
 export function detectMjuIntent(utterance: string): IntentEntry | null {
@@ -103,6 +104,7 @@ export function detectMjuIntent(utterance: string): IntentEntry | null {
 
 /** 학사 데이터 조회 결과. data가 있으면 NemoClaw에 컨텍스트로 전달할 수 있다. */
 export interface MjuDataResult {
+  dataType: string;
   description: string;
   data: unknown;
   /** 포맷터로 만든 폴백 텍스트 (NemoClaw 실패 시 사용) */
@@ -119,7 +121,7 @@ export async function fetchMjuData(kakaoId: string, utterance: string): Promise<
   // 출석 — 특수 체이닝
   if (intent.keywords[0] === "출석") {
     const text = await handleAttendance(kakaoId);
-    return { description: intent.description, data: text, fallbackText: text };
+    return { dataType: intent.dataType, description: intent.description, data: text, fallbackText: text };
   }
 
   try {
@@ -129,10 +131,11 @@ export async function fetchMjuData(kakaoId: string, utterance: string): Promise<
     if (data && typeof data === "object" && "error" in (data as Record<string, unknown>)) {
       const errObj = (data as { error: { message?: string } }).error;
       const errText = `${intent.emoji} ${intent.description}\n\n오류: ${errObj.message || "알 수 없는 오류"}`;
-      return { description: intent.description, data: null, fallbackText: errText };
+      return { dataType: intent.dataType, description: intent.description, data: null, fallbackText: errText };
     }
 
     return {
+      dataType: intent.dataType,
       description: intent.description,
       data,
       fallbackText: intent.formatter(data),
@@ -140,7 +143,7 @@ export async function fetchMjuData(kakaoId: string, utterance: string): Promise<
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const errText = `${intent.emoji} ${intent.description}\n\n조회 실패: ${msg}`;
-    return { description: intent.description, data: null, fallbackText: errText };
+    return { dataType: intent.dataType, description: intent.description, data: null, fallbackText: errText };
   }
 }
 

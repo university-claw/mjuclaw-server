@@ -33,6 +33,7 @@ export interface KakaoBasicCard {
   basicCard: {
     title: string;
     description: string;
+    thumbnail?: { imageUrl: string };
     buttons: Array<{
       action: "webLink" | "message" | "block";
       label: string;
@@ -40,6 +41,29 @@ export interface KakaoBasicCard {
       messageText?: string;
     }>;
   };
+}
+
+// ── 처리 결과 (카드 or 텍스트) ──────────────────────────────────
+
+export interface ProcessResult {
+  type: "card" | "text";
+  text?: string;         // simpleText 응답
+  viewId?: string;       // view-store ID (카드일 때)
+  title?: string;        // basicCard 제목
+  summary?: string;      // basicCard description
+}
+
+// ── 웹 뷰 저장소 ────────────────────────────────────────────────
+
+export interface ViewEntry {
+  id: string;
+  dataType: string;
+  title: string;
+  summary: string;       // AI 생성 요약 (짧은 버전)
+  rawData: unknown;       // mju-cli JSON 원본
+  aiResponse: string;     // NemoClaw 전체 응답
+  createdAt: number;
+  expiresAt: number;
 }
 
 export type KakaoOutput = KakaoSimpleText | KakaoBasicCard;

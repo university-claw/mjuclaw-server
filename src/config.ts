@@ -29,4 +29,8 @@ export const config = {
     cleanupIntervalMs: 60 * 60 * 1000, // 1시간
     maxHistory: 20,
   },
+  viewStore: {
+    ttlMs: 30 * 60 * 1000,         // 30분
+    cleanupIntervalMs: 5 * 60 * 1000, // 5분
+  },
 };

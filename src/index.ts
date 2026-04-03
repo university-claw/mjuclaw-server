@@ -1,6 +1,7 @@
 import { config } from "./config";
 import { app } from "./server";
 import { startCleanup } from "./session";
+import { startViewCleanup } from "./view-store";
 
 const server = app.listen(config.port, () => {
   console.log("");
@@ -17,6 +18,7 @@ const server = app.listen(config.port, () => {
 });
 
 startCleanup();
+startViewCleanup();
 
 // Graceful shutdown
 function shutdown(signal: string) {

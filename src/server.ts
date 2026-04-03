@@ -3,15 +3,19 @@ import path from "path";
 import { config } from "./config";
 import {
   createImmediateResponse,
+  createResultResponse,
   createTextResponse,
   createWelcomeResponse,
   sendCallback,
+  sendCallbackResult,
   sendCallbackWelcome,
 } from "./kakao";
 import { fetchMjuData, mjuLogin } from "./mju-tools";
 import { runAgent } from "./nemoclaw";
 import { isVerified, onboardUser, resetSession, getStats } from "./session";
-import type { KakaoSkillRequest } from "./types";
+import { storeView, getView } from "./view-store";
+import { renderViewHtml, renderExpiredHtml } from "./view-renderer";
+import type { KakaoSkillRequest, ProcessResult } from "./types";
 
 export const app = express();
 app.use(express.json());
@@ -29,6 +33,22 @@ app.get("/health", (_req, res) => {
     uptime: Math.floor((Date.now() - startedAt) / 1000),
     sessions: stats,
   });
+});
+
+// ── GET /view/:id — 학사 데이터 웹 뷰 ───────────────────────────
+
+app.get("/view/:id", (req, res) => {
+  const id = req.params.id;
+  if (!/^[0-9a-f-]{36}$/.test(id)) {
+    res.status(400).send("잘못된 접근입니다.");
+    return;
+  }
+  const entry = getView(id);
+  if (!entry) {
+    res.status(404).send(renderExpiredHtml());
+    return;
+  }
+  res.send(renderViewHtml(entry));
 });
 
 // ── GET /onboard — 학교 인증 웹페이지 ────────────────────────────
@@ -52,7 +72,6 @@ app.post("/onboard/submit", async (req, res) => {
     return;
   }
 
-  // 1) mju-cli로 실제 로그인 검증 + 세션 생성
   console.log(`[onboard] user=${String(uid).slice(0, 8)}... studentId=${studentId} — CLI 로그인 시도`);
   const loginResult = await mjuLogin(uid, studentId, password);
   if (!loginResult.success) {
@@ -61,7 +80,6 @@ app.post("/onboard/submit", async (req, res) => {
     return;
   }
 
-  // 2) 크리덴셜 암호화 저장 + 세션 등록
   const result = onboardUser(uid, studentId, password);
   console.log(`[onboard] user=${String(uid).slice(0, 8)}... → ${result.success}`);
   res.json(result);
@@ -81,21 +99,17 @@ app.post("/skill", (req, res) => {
   }
 
   console.log(`[skill] user=${userId.slice(0, 8)}... msg="${utterance.slice(0, 50)}" callback=${!!callbackUrl}`);
-  console.log(`[skill] body: ${JSON.stringify(req.body)}`);
 
   // 미인증 유저 → 웰컴 카드 (온보딩 버튼)
   if (!isVerified(userId)) {
     const onboardUrl = `${config.serverUrl}/onboard?uid=${encodeURIComponent(userId)}`;
-
     if (callbackUrl) {
       res.json(createImmediateResponse("잠시만요..."));
       sendCallbackWelcome(callbackUrl, onboardUrl).catch((err) => {
         console.error(`[skill] welcome callback error: ${err.message}`);
       });
     } else {
-      const welcomeRes = createWelcomeResponse(onboardUrl);
-      console.log(`[skill] response: ${JSON.stringify(welcomeRes).slice(0, 500)}`);
-      res.json(welcomeRes);
+      res.json(createWelcomeResponse(onboardUrl));
     }
     return;
   }
@@ -106,12 +120,8 @@ app.post("/skill", (req, res) => {
       console.error(`[skill] async error: ${err.message}`);
     });
   } else {
-    handleSync(userId, utterance)
-      .then((text) => {
-        const resp = createTextResponse(text);
-        console.log(`[skill] sync response: ${JSON.stringify(resp).slice(0, 300)}`);
-        res.json(resp);
-      })
+    processSync(userId, utterance)
+      .then((result) => res.json(createResultResponse(result)))
       .catch(() => res.json(createTextResponse("처리 중 오류가 발생했습니다.")));
   }
 });
@@ -119,12 +129,10 @@ app.post("/skill", (req, res) => {
 // ── 비동기 처리 (콜백 사용) ──────────────────────────────────────
 
 async function processAsync(userId: string, utterance: string, callbackUrl: string): Promise<void> {
-  console.log(`[async] starting agent for user=${userId.slice(0, 8)}...`);
   try {
     const result = await processMessage(userId, utterance);
-    console.log(`[async] agent response (${result.length} chars): ${result.slice(0, 100)}`);
-    await sendCallback(callbackUrl, result);
-    console.log(`[async] callback sent to ${callbackUrl.slice(0, 60)}...`);
+    console.log(`[async] result type=${result.type}, title=${result.title || "-"}`);
+    await sendCallbackResult(callbackUrl, result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[async] error: ${msg}`);
@@ -134,15 +142,14 @@ async function processAsync(userId: string, utterance: string, callbackUrl: stri
 
 // ── 동기 처리 (5초 제한) ─────────────────────────────────────────
 
-async function handleSync(userId: string, utterance: string): Promise<string> {
+async function processSync(userId: string, utterance: string): Promise<ProcessResult> {
   const cmd = parseCommand(utterance);
-  if (cmd) return handleCommand(userId, cmd.command, cmd.args);
+  if (cmd) return { type: "text", text: handleCommand(userId, cmd.command, cmd.args) };
 
-  // 4.5초 타임아웃으로 에이전트 호출 시도
   try {
     const result = await Promise.race([
-      runAgent(utterance, userId),
-      new Promise<string>((_, reject) =>
+      processMessage(userId, utterance),
+      new Promise<ProcessResult>((_, reject) =>
         setTimeout(() => reject(new Error("timeout")), 4500)
       ),
     ]);
@@ -150,36 +157,24 @@ async function handleSync(userId: string, utterance: string): Promise<string> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "timeout") {
-      return "응답 생성에 시간이 걸리고 있습니다. 잠시 후 다시 시도해주세요.";
+      return { type: "text", text: "응답 생성에 시간이 걸리고 있습니다. 잠시 후 다시 시도해주세요." };
     }
-    console.error(`[skill] sync agent error: ${msg}`);
-    return "처리 중 오류가 발생했습니다.";
+    return { type: "text", text: "처리 중 오류가 발생했습니다." };
   }
 }
 
 // ── 메시지 처리 ──────────────────────────────────────────────────
 
-async function processMessage(userId: string, utterance: string): Promise<string> {
+async function processMessage(userId: string, utterance: string): Promise<ProcessResult> {
   const cmd = parseCommand(utterance);
-  if (cmd) return handleCommand(userId, cmd.command, cmd.args);
+  if (cmd) return { type: "text", text: handleCommand(userId, cmd.command, cmd.args) };
 
   // 1) 키워드 매칭 → mju-cli로 학사 데이터 조회
-  let mjuContext = "";
-  let fallbackText = "";
+  let mjuResult: Awaited<ReturnType<typeof fetchMjuData>> = null;
   try {
-    const mjuResult = await fetchMjuData(userId, utterance);
-    if (mjuResult) {
-      if (!mjuResult.data) {
-        // 에러 발생 시 폴백 텍스트 바로 반환
-        return mjuResult.fallbackText;
-      }
-      // 데이터를 NemoClaw 컨텍스트로 준비
-      const dataStr = typeof mjuResult.data === "string"
-        ? mjuResult.data
-        : JSON.stringify(mjuResult.data, null, 2);
-      mjuContext = `\n\n[학사 데이터: ${mjuResult.description}]\n${dataStr}`;
-      fallbackText = mjuResult.fallbackText;
-      console.log(`[mju] data fetched: ${mjuResult.description} (${dataStr.length} chars)`);
+    mjuResult = await fetchMjuData(userId, utterance);
+    if (mjuResult && !mjuResult.data) {
+      return { type: "text", text: mjuResult.fallbackText };
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -187,18 +182,46 @@ async function processMessage(userId: string, utterance: string): Promise<string
   }
 
   // 2) NemoClaw에 질문 + 학사 데이터 전달
+  let aiResponse = "";
   try {
-    const agentMessage = mjuContext
-      ? `${utterance}${mjuContext}`
-      : utterance;
-    return await runAgent(agentMessage, userId);
+    let agentMessage = utterance;
+    if (mjuResult?.data) {
+      const dataStr = typeof mjuResult.data === "string"
+        ? mjuResult.data
+        : JSON.stringify(mjuResult.data, null, 2);
+      agentMessage = `${utterance}\n\n[학사 데이터: ${mjuResult.description}]\n${dataStr}`;
+    }
+    aiResponse = await runAgent(agentMessage, userId);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[skill] agent error: ${msg}`);
-    // NemoClaw 실패 시 학사 데이터 폴백
-    if (fallbackText) return fallbackText;
-    return "에이전트 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.";
+    // NemoClaw 실패 시 폴백
+    if (mjuResult?.fallbackText) {
+      aiResponse = mjuResult.fallbackText;
+    } else {
+      return { type: "text", text: "에이전트 처리 중 오류가 발생했습니다." };
+    }
   }
+
+  // 3) 학사 데이터가 있으면 → 카드 응답 (웹 뷰 링크)
+  if (mjuResult?.data) {
+    const viewId = storeView({
+      dataType: mjuResult.dataType,
+      title: `${mjuResult.description}`,
+      summary: aiResponse.slice(0, 200),
+      rawData: mjuResult.data,
+      aiResponse,
+    });
+    return {
+      type: "card",
+      viewId,
+      title: mjuResult.description,
+      summary: aiResponse.slice(0, 200),
+    };
+  }
+
+  // 4) 일반 대화 → 텍스트 응답
+  return { type: "text", text: aiResponse };
 }
 
 // ── 명령어 파싱 ──────────────────────────────────────────────────
