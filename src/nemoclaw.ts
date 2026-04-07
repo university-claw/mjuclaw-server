@@ -73,7 +73,7 @@ function execAgent(message: string, sessionId: string): Promise<string> {
     const cmd = [
       ". /sandbox/.bashrc",
       "&&",
-      `export NVIDIA_API_KEY=${shellQuote(config.sandbox.nvidiaApiKey)}`,
+      `export GEMINI_API_KEY=${shellQuote(config.sandbox.geminiApiKey)}`,
       "&&",
       "nemoclaw-start",
       "openclaw",

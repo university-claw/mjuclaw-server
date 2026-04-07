@@ -16,7 +16,7 @@ export const config = {
   serverUrl: process.env.SERVER_URL || `http://localhost:${process.env.PORT || "3000"}`,
   sandbox: {
     name: process.env.SANDBOX_NAME || "mjuclaw",
-    nvidiaApiKey: process.env.NVIDIA_API_KEY || "",
+    geminiApiKey: process.env.GEMINI_API_KEY || "",
     agentTimeout: 120_000, // 2분
   },
   security: {

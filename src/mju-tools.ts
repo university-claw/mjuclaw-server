@@ -8,7 +8,7 @@ const USER_DATA_DIR = path.join(__dirname, "..", "data", "users");
 
 // ── CLI 실행 ────────────────────────────────────────────────────────
 
-function runMju(args: string[], timeoutMs = 30_000): Promise<string> {
+function runMju(args: string[], timeoutMs = 90_000): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile("node", [MJU_CLI, ...args], { timeout: timeoutMs }, (err, stdout, stderr) => {
       if (err) {
