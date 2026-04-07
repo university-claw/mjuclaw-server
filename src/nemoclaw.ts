@@ -7,15 +7,11 @@ import { config } from "./config";
 // ── OpenShell 바이너리 탐색 ──────────────────────────────────────
 
 function resolveOpenshell(): string | null {
-  // 1. PATH에서 찾기
   try {
     const found = execFileSync("which", ["openshell"], { encoding: "utf-8" }).trim();
     if (found.startsWith("/")) return found;
-  } catch {
-    /* ignored */
-  }
+  } catch { /* ignored */ }
 
-  // 2. 알려진 경로 폴백
   const home = os.homedir();
   const candidates = [
     path.join(home, ".local", "bin", "openshell"),
@@ -26,41 +22,38 @@ function resolveOpenshell(): string | null {
     try {
       fs.accessSync(p, fs.constants.X_OK);
       return p;
-    } catch {
-      /* ignored */
-    }
+    } catch { /* ignored */ }
   }
   return null;
 }
 
 const OPENSHELL = resolveOpenshell();
 if (!OPENSHELL) {
-  console.error("[nemoclaw] openshell not found on PATH or common locations");
+  console.error("[nemoclaw] openshell not found");
   process.exit(1);
 }
 
-// ── 셸 인젝션 방지용 quote ───────────────────────────────────────
+// ── 셸 인젝션 방지 ────────────────────────────────────────────────
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-// ── 유저별 동시성 제어 (Promise 큐) ──────────────────────────────
+// ── 유저별 동시성 제어 ────────────────────────────────────────────
 
 const userQueues = new Map<string, Promise<string>>();
 
 function enqueue(userId: string, fn: () => Promise<string>): Promise<string> {
   const prev = userQueues.get(userId) || Promise.resolve("");
-  const next = prev.then(fn, fn); // 이전 작업 실패해도 다음 실행
+  const next = prev.then(fn, fn);
   userQueues.set(userId, next);
   return next;
 }
 
-// ── 에이전트 실행 ────────────────────────────────────────────────
+// ── 에이전트 실행 ─────────────────────────────────────────────────
 
 function execAgent(message: string, sessionId: string): Promise<string> {
   return new Promise((resolve) => {
-    // SSH config 생성
     const sshConfig = execFileSync(OPENSHELL!, ["sandbox", "ssh-config", config.sandbox.name], {
       encoding: "utf-8",
     });
@@ -80,7 +73,7 @@ function execAgent(message: string, sessionId: string): Promise<string> {
       "agent",
       "--agent",
       "main",
-      "--local",
+      "--json",
       "-m",
       shellQuote(message),
       "--session-id",
@@ -98,53 +91,37 @@ function execAgent(message: string, sessionId: string): Promise<string> {
     proc.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
 
     proc.on("close", (code) => {
-      // 임시 SSH config 정리
+      try { fs.unlinkSync(confPath); fs.rmdirSync(confDir); } catch { /* ignored */ }
+
+      // JSON 파싱 시도
       try {
-        fs.unlinkSync(confPath);
-        fs.rmdirSync(confDir);
-      } catch {
-        /* ignored */
-      }
+        const raw = stdout.trim();
+        const jsonStart = raw.indexOf("{");
+        if (jsonStart !== -1) {
+          const json = JSON.parse(raw.slice(jsonStart));
+          const text = json?.result?.payloads?.[0]?.text || "";
+          if (text && text !== "LLM request timed out.") {
+            resolve(text);
+            return;
+          }
+          if (text === "LLM request timed out.") {
+            resolve("응답 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+            return;
+          }
+        }
+      } catch { /* JSON 파싱 실패 시 아래로 */ }
 
-      // NemoClaw 셋업 라인 필터링 (telegram-bridge.js 패턴)
-      const lines = stdout.split("\n");
-      const responseLines = lines.filter(
-        (l) =>
-          !l.startsWith("Setting up NemoClaw") &&
-          !l.startsWith("[plugins]") &&
-          !l.startsWith("[gateway]") &&
-          !l.startsWith("(node:") &&
-          !l.includes("NemoClaw ready") &&
-          !l.includes("NemoClaw registered") &&
-          !l.includes("openclaw agent") &&
-          !l.includes("privilege separation") &&
-          !l.includes("┌─") &&
-          !l.includes("│ ") &&
-          !l.includes("└─") &&
-          l.trim() !== ""
-      );
-
-      const response = responseLines.join("\n").trim();
-
-      if (response) {
-        resolve(response);
-      } else if (code !== 0) {
+      if (code !== 0) {
         resolve(`에이전트 오류 (exit ${code}). ${stderr.trim().slice(0, 300)}`);
       } else {
         resolve("(응답 없음)");
       }
     });
 
-    proc.on("error", (err) => {
-      resolve(`에러: ${err.message}`);
-    });
+    proc.on("error", (err) => resolve(`에러: ${err.message}`));
   });
 }
 
-/**
- * 유저 메시지를 NemoClaw 샌드박스의 OpenClaw 에이전트에 전달하고 응답을 반환한다.
- * 같은 유저의 요청은 직렬화된다 (동시성 제어).
- */
 export function runAgent(message: string, userId: string): Promise<string> {
   return enqueue(userId, () => execAgent(message, userId));
 }

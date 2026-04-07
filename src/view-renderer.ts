@@ -19,7 +19,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .header h1 { font-size: 18px; color: #1a1a1a; margin-top: 8px; }
 .card { background: #fff; border-radius: 14px; box-shadow: 0 1px 8px rgba(0,0,0,0.06); padding: 20px; margin-bottom: 12px; }
 .card-title { font-size: 14px; font-weight: 600; color: #3B82F6; margin-bottom: 10px; }
-.ai-text { font-size: 14px; line-height: 1.7; color: #333; white-space: pre-wrap; word-break: break-word; }
+.ai-text { font-size: 14px; line-height: 1.7; color: #333; word-break: break-word; }
+.ai-text p { margin-bottom: 8px; }
+.ai-text ul, .ai-text ol { padding-left: 18px; margin-bottom: 8px; }
+.ai-text li { margin-bottom: 4px; }
+.ai-text strong { font-weight: 600; }
+.ai-text h1, .ai-text h2, .ai-text h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; margin-top: 12px; }
+.ai-text hr { border: none; border-top: 1px solid #eee; margin: 10px 0; }
 .section { margin-bottom: 16px; }
 .section-title { font-size: 13px; font-weight: 600; color: #666; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
 .item { padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
@@ -52,8 +58,12 @@ td { padding: 8px; border-bottom: 1px solid #f0f0f0; color: #333; }
   </div>
   <div class="card">
     <div class="card-title">AI 요약</div>
-    <div class="ai-text">${esc(entry.aiResponse)}</div>
+    <div class="ai-text" id="ai-summary"></div>
   </div>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    document.getElementById('ai-summary').innerHTML = marked.parse(${JSON.stringify(entry.aiResponse)});
+  </script>
   ${dataHtml}
   <div class="footer">${esc(time)} 조회</div>
 </div>

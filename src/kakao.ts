@@ -49,9 +49,10 @@ export function createCardResponse(title: string, description: string, viewUrl: 
 export function createResultResponse(result: ProcessResult): KakaoSkillResponse {
   if (result.type === "card" && result.viewId) {
     const viewUrl = `${config.serverUrl}/view/${result.viewId}`;
-    return createCardResponse(result.title || "조회 결과", result.summary || "", viewUrl);
+    const desc = result.summary || "자세히 보기를 눌러 확인하세요.";
+    return createCardResponse(result.title || "조회 결과", desc, viewUrl);
   }
-  return createTextResponse(result.text || "");
+  return createTextResponse(result.text || "응답을 받지 못했습니다.");
 }
 
 // ── 웰컴 카드 (온보딩 버튼 포함) ─────────────────────────────────
