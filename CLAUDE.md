@@ -67,7 +67,7 @@ curl -X POST http://localhost:3000/skill -H "Content-Type: application/json" \
 ### Key Design Decisions
 
 1. **mju-cli는 호스트에서 execFile로 실행** — `node mju-cli/dist/main.js` 를 직접 spawn. 유저별 격리된 `--app-dir`(data/users/{kakaoId})을 전달하여 크리덴셜/세션 분리. `--format json` 으로 출력을 파싱.
-2. **AI 에이전트는 Google AI Studio 직접 호출** — `gemma-4-26b-a4b-it` 모델, HTTPS API 호출. 유저별 대화 히스토리 인메모리 관리 (최대 20턴). 60초 타임아웃.
+2. **AI 에이전트는 NemoClaw 샌드박스를 통해 호출** — `nemoclaw.ts`가 `openshell sandbox ssh-config`로 임시 SSH config를 만들어 샌드박스 안에서 `nemoclaw-start openclaw agent --json`을 실행. 실제 추론 모델은 `gemini-3.1-flash-lite-preview` (Google Gemini) 이며 `nemoclaw onboard` 단계에서 샌드박스에 박힘. 서버는 `GEMINI_API_KEY`만 환경변수로 주입. 대화 히스토리는 서버가 아니라 openclaw가 `--session-id kakao-{userId}` 기준으로 관리. 타임아웃 120초(`config.ts:agentTimeout`).
 3. **카카오 5초 타임아웃 우회** — 오픈빌더 "콜백 URL 발행" 활성화 필수. 없으면 callbackUrl이 req.body에 포함되지 않음.
 4. **유저별 동시성 제어** — nemoclaw.ts의 `enqueue()` 함수가 같은 userId의 요청을 Promise 체인으로 직렬화.
 5. **카드 + 웹 뷰 패턴** — 학사 데이터 조회 시 카카오 basicCard(80자 요약 + "자세히 보기" 버튼) → 웹 뷰(`/view/:id`)에서 전체 데이터를 HTML로 렌더링. ViewEntry는 30분 TTL.
